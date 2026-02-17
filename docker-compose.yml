@@ -1,0 +1,195 @@
+services:
+  jsr-mt5:
+    image: gmag11/metatrader5_vnc
+    container_name: jsr-mt5
+    ports:
+      - "5900:5900"
+      - "18812:18812"
+    volumes:
+      - jsr-mt5data:/config
+    environment:
+      - CUSTOM_USER=${MT5_VNC_USER:-admin}
+      - PASSWORD=${MT5_VNC_PASSWORD:-admin}
+    healthcheck:
+      test: ["CMD", "pgrep", "-f", "terminal64.exe"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 2G
+    networks:
+      - jsr-network
+
+  jsr-postgres:
+    image: postgres:16-alpine
+    container_name: jsr-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: jsr_hydra
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASS:-postgres}
+    volumes:
+      - jsr-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+    networks:
+      - jsr-network
+
+  jsr-redis:
+    image: redis:7-alpine
+    container_name: jsr-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+    networks:
+      - jsr-network
+
+  jsr-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: jsr-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-postgres}:${DB_PASS:-postgres}@jsr-postgres:5432/jsr_hydra
+      - REDIS_URL=redis://jsr-redis:6379/0
+      - MT5_HOST=jsr-mt5
+      - MT5_RPYC_PORT=18812
+    env_file:
+      - .env
+    depends_on:
+      jsr-postgres:
+        condition: service_healthy
+      jsr-redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+    networks:
+      - jsr-network
+
+  jsr-engine:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: jsr-engine
+    command: python -m app.engine.engine_runner
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-postgres}:${DB_PASS:-postgres}@jsr-postgres:5432/jsr_hydra
+      - REDIS_URL=redis://jsr-redis:6379/0
+      - MT5_HOST=jsr-mt5
+      - MT5_RPYC_PORT=18812
+    env_file:
+      - .env
+    depends_on:
+      jsr-backend:
+        condition: service_started
+      jsr-mt5:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+    volumes:
+      - jsr-mlmodels:/app/models
+    networks:
+      - jsr-network
+
+  jsr-retrainer:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: jsr-retrainer
+    command: python -m app.engine.retrainer
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${DB_USER:-postgres}:${DB_PASS:-postgres}@jsr-postgres:5432/jsr_hydra
+      - REDIS_URL=redis://jsr-redis:6379/0
+    env_file:
+      - .env
+    depends_on:
+      jsr-backend:
+        condition: service_started
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4G
+    volumes:
+      - jsr-mlmodels:/app/models
+    networks:
+      - jsr-network
+
+  jsr-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: jsr-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://jsr-backend:8000
+    depends_on:
+      - jsr-backend
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+    networks:
+      - jsr-network
+
+  jsr-caddy:
+    image: caddy:2
+    container_name: jsr-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile
+      - jsr-caddydata:/data
+    restart: unless-stopped
+    networks:
+      - jsr-network
+
+volumes:
+  jsr-pgdata:
+  jsr-mt5data:
+  jsr-mlmodels:
+  jsr-caddydata:
+
+networks:
+  jsr-network:
+    driver: bridge

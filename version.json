@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "codename": "Hydra",
+  "updated_at": "2026-02-17T00:00:00Z",
+  "changelog": [
+    {"version": "1.0.0", "date": "2026-02-17", "note": "Initial build"}
+  ]
+}
