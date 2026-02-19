@@ -614,6 +614,9 @@ class Brain:
                 "rl_distributions": self._learner.parameter_adapter.get_all_distributions(),
                 "exploration_rate": self._learner._rl_exploration_rate,
                 "total_trades_analyzed": self._learner._rl_total_trades,
+                # XP and RL data for cross-process sync
+                "strategy_xp": self._strategy_xp.get_all_xp(),
+                "rl_stats_full": self._learner.get_rl_stats(),
             }
 
         # Otherwise, try to load from Redis (engine writes, API reads)
@@ -674,6 +677,7 @@ class Brain:
     def get_rl_stats(self) -> dict:
         """
         PURPOSE: Return comprehensive RL statistics for the brain dashboard.
+        Falls back to Redis if local brain has no data (API process).
 
         Includes Thompson Sampling distributions, trade history stats,
         confidence adjustments, and exploration rate.
@@ -683,6 +687,12 @@ class Brain:
 
         CALLED BY: api/routes_brain.py /rl-stats endpoint
         """
+        # Fall back to Redis if this is the API process
+        if self._cycle_count == 0:
+            rs = self.load_from_redis()
+            if rs and "rl_stats_full" in rs:
+                return rs["rl_stats_full"]
+
         rl_stats = self._learner.get_rl_stats()
 
         # Add trade history summary
@@ -709,12 +719,19 @@ class Brain:
     def get_strategy_xp(self) -> dict:
         """
         PURPOSE: Return XP/level data for all strategies.
+        Falls back to Redis if local brain has no data (API process).
 
         Returns:
             dict: {strategy_code: strategy_xp_state}
 
         CALLED BY: api/routes_brain.py /strategy-xp endpoint
         """
+        if self._cycle_count > 0:
+            return self._strategy_xp.get_all_xp()
+        # Fall back to Redis
+        rs = self.load_from_redis()
+        if rs and "strategy_xp" in rs:
+            return rs["strategy_xp"]
         return self._strategy_xp.get_all_xp()
 
     # ════════════════════════════════════════════════════════════════
