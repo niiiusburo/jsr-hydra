@@ -286,6 +286,9 @@ class TradingEngine:
                 strategies=len(self._strategies)
             )
 
+            # 8b. Recover tracking of existing MT5 positions (after restart)
+            await self._recover_open_positions()
+
             # 9. Run main trading loop (blocking)
             await self._main_loop()
 
@@ -577,6 +580,8 @@ class TradingEngine:
                     all_signals_summary = {}
                     all_trades = []
                     all_risk_checks = []
+                    _regime_str = "UNKNOWN"
+                    _regime_conf = 0
 
                     # ========== LOOP OVER ALL SYMBOLS ==========
                     for symbol in self._symbols:
@@ -842,6 +847,15 @@ class TradingEngine:
                                     brain = get_brain()
                                     # Extract just the strategy letter (e.g. "A") from strat_key (e.g. "EURUSD_A")
                                     pure_strategy_code = strat_key.split('_')[-1] if '_' in strat_key else strat_key
+                                    # Use per-symbol regime (available from the current symbol loop iteration)
+                                    regime_str_for_brain = "UNKNOWN"
+                                    if isinstance(regime, dict):
+                                        regime_str_for_brain = regime.get("regime", "UNKNOWN")
+                                    elif regime is not None and hasattr(regime, "regime"):
+                                        regime_str_for_brain = regime.regime.value if hasattr(regime.regime, "value") else str(regime.regime)
+                                    elif isinstance(regime, str):
+                                        regime_str_for_brain = regime
+
                                     brain.process_trade_result({
                                         "strategy": pure_strategy_code,
                                         "symbol": signal.symbol,
@@ -849,7 +863,7 @@ class TradingEngine:
                                         "lots": risk_check.position_size,
                                         "entry_price": order_result.get('price'),
                                         "ticket": order_result.get('ticket'),
-                                        "regime_at_entry": _regime_str,
+                                        "regime_at_entry": regime_str_for_brain,
                                     })
                                 except Exception as brain_err:
                                     logger.warning("brain_trade_notify_error", error=str(brain_err))
@@ -963,14 +977,15 @@ class TradingEngine:
 
                     # --- Log comprehensive JSON summary ---
                     # Resolve regime string and confidence from the last symbol's regime object
-                    _regime_str = "UNKNOWN"
-                    _regime_conf = 0
                     if isinstance(regime, dict):
                         _regime_str = regime.get("regime", "UNKNOWN")
                         _regime_conf = regime.get("confidence", 0)
                     elif regime is not None and hasattr(regime, "regime"):
                         _regime_str = regime.regime.value if hasattr(regime.regime, "value") else str(regime.regime)
                         _regime_conf = getattr(regime, "confidence", 0)
+                    else:
+                        _regime_str = "UNKNOWN"
+                        _regime_conf = 0
 
                     cycle_summary = {
                         "event": "engine_cycle",
@@ -1050,6 +1065,70 @@ class TradingEngine:
 
         self._cached_master_id = master.id
         return master.id
+
+    async def _recover_open_positions(self) -> None:
+        """
+        PURPOSE: On engine startup, recover tracking of existing MT5 positions
+        by matching them with OPEN trades in the database.
+
+        Without this, positions opened before a restart would never be detected
+        as closed, preventing profit recording and Brain learning.
+
+        CALLED BY: start()
+        """
+        try:
+            mt5_positions = await self._order_manager.get_open_positions()
+            if not mt5_positions:
+                logger.info("position_recovery_none", message="No MT5 positions to recover")
+                return
+
+            async with AsyncSessionLocal() as session:
+                # Find all OPEN trades in DB
+                stmt = select(TradeModel).where(TradeModel.status == "OPEN")
+                result = await session.execute(stmt)
+                open_trades = result.scalars().all()
+
+                # Build lookup by mt5_ticket
+                db_by_ticket = {}
+                for t in open_trades:
+                    if t.mt5_ticket:
+                        db_by_ticket[t.mt5_ticket] = t
+
+                recovered = 0
+                for pos in mt5_positions:
+                    ticket = pos.get('ticket')
+                    if ticket and ticket not in self._open_trades:
+                        db_trade = db_by_ticket.get(ticket)
+                        if db_trade:
+                            # Recover: look up strategy code from the Strategy table
+                            strategy_code = "A"  # fallback
+                            if db_trade.strategy_id:
+                                from app.models.strategy import Strategy
+                                strat_stmt = select(Strategy).where(Strategy.id == db_trade.strategy_id)
+                                strat_result = await session.execute(strat_stmt)
+                                strat_obj = strat_result.scalar_one_or_none()
+                                if strat_obj:
+                                    strategy_code = strat_obj.code
+
+                            self._open_trades[ticket] = {
+                                'trade_id': db_trade.id,
+                                'strategy_code': strategy_code,
+                                'symbol': db_trade.symbol,
+                                'direction': db_trade.direction,
+                                'sl': float(db_trade.stop_loss or 0),
+                                'tp': float(db_trade.take_profit or 0),
+                            }
+                            recovered += 1
+
+                logger.info(
+                    "position_recovery_complete",
+                    mt5_positions=len(mt5_positions),
+                    db_open_trades=len(open_trades),
+                    recovered=recovered,
+                    tracked=len(self._open_trades),
+                )
+        except Exception as e:
+            logger.warning("position_recovery_failed", error=str(e))
 
     async def _check_closed_positions(self) -> None:
         """
@@ -1196,6 +1275,35 @@ class TradingEngine:
                 trade_obj = result.scalar_one_or_none()
 
                 if trade_obj:
+                    # Calculate profit from entry/exit if not provided by MT5
+                    if profit == 0.0 and exit_price > 0 and trade_obj.entry_price:
+                        entry_p = float(trade_obj.entry_price)
+                        lots = float(trade_obj.lots or 0.01)
+                        symbol = trade_info.get('symbol', '')
+                        direction = trade_info.get('direction', 'BUY')
+
+                        # Point value depends on the symbol
+                        if 'JPY' in symbol:
+                            pip_value = 100.0  # per lot per pip for JPY pairs
+                            point_diff = exit_price - entry_p
+                        elif 'XAU' in symbol:
+                            pip_value = 100.0  # per lot per pip for gold
+                            point_diff = exit_price - entry_p
+                        else:
+                            pip_value = 100000.0  # per lot for standard pairs
+                            point_diff = exit_price - entry_p
+
+                        if direction == 'SELL':
+                            point_diff = -point_diff
+
+                        profit = round(point_diff * lots * pip_value, 2)
+                        logger.info(
+                            "profit_calculated_from_prices",
+                            entry=entry_p, exit=exit_price,
+                            direction=direction, lots=lots,
+                            profit=profit, symbol=symbol,
+                        )
+
                     await TradeService.close_trade(
                         session, trade_id,
                         exit_price=exit_price,
@@ -1227,8 +1335,10 @@ class TradingEngine:
                     try:
                         net_profit = profit - commission - swap
                         brain = get_brain()
+                        # Extract pure strategy code (e.g. "A" from "A" or "EURUSD_A")
+                        pure_code = strategy_code.split('_')[-1] if '_' in strategy_code else strategy_code
                         brain.process_trade_result({
-                            "strategy": f"{trade_info['symbol']}_{strategy_code}",
+                            "strategy": pure_code,
                             "symbol": trade_info['symbol'],
                             "direction": trade_info['direction'],
                             "entry_price": trade_obj.entry_price,
