@@ -453,6 +453,7 @@ class TradingEngine:
                     from app.bridge.synthetic_feed import SyntheticFeed
                     self._synthetic_feed = SyntheticFeed()
                     self._data_feed.set_synthetic_fallback(self._synthetic_feed)
+                    self._account_info.enable_synthetic_mode()
                 else:
                     raise
 

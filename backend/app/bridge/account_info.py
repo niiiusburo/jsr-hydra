@@ -37,6 +37,20 @@ class AccountInfo:
         _cache_time: Timestamp of last cache fill
     """
 
+    # Default account data when MT5 is unavailable (DRY_RUN mode)
+    SYNTHETIC_ACCOUNT = {
+        "login": 0,
+        "server": "synthetic",
+        "balance": 10000.0,
+        "equity": 10000.0,
+        "margin": 0.0,
+        "free_margin": 10000.0,
+        "margin_level": 9999.0,
+        "profit": 0.0,
+        "currency": "USD",
+        "leverage": 100,
+    }
+
     def __init__(
         self,
         connector: MT5Connector,
@@ -52,8 +66,14 @@ class AccountInfo:
         self._connector = connector
         self._cache: Optional[dict] = None
         self._cache_time: float = 0.0
+        self._use_synthetic: bool = False
 
         logger.info("account_info_initialized", dry_run=dry_run)
+
+    def enable_synthetic_mode(self) -> None:
+        """Enable synthetic account data for DRY_RUN without MT5."""
+        self._use_synthetic = True
+        logger.info("account_info_synthetic_mode_enabled", balance=self.SYNTHETIC_ACCOUNT["balance"])
 
     async def _get_account_data(self) -> dict:
         """
@@ -61,14 +81,18 @@ class AccountInfo:
 
         If cached data is less than 5 seconds old, returns cache.
         Otherwise, calls connector.get_account_info() (GET /account).
+        In synthetic mode, returns default account data.
 
         Returns:
             dict: Account data with keys: login, server, balance, equity,
                   margin, free_margin, margin_level, profit, currency, leverage.
 
         Raises:
-            ConnectionError: If MT5 REST call fails.
+            ConnectionError: If MT5 REST call fails and not in synthetic mode.
         """
+        if self._use_synthetic:
+            return dict(self.SYNTHETIC_ACCOUNT)
+
         now = time.time()
         if self._cache is not None and (now - self._cache_time) < _CACHE_TTL:
             return self._cache
