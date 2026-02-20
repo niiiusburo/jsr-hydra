@@ -15,6 +15,8 @@ import signal
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 
+import pandas as pd
+
 from app.config.constants import EventType
 from app.config.settings import settings
 from app.bridge import create_bridge
@@ -134,6 +136,8 @@ class TradingEngine:
         self._data_feed: Optional[DataFeed] = None
         self._order_manager: Optional[OrderManager] = None
         self._account_info: Optional[AccountInfo] = None
+        self._using_synthetic: bool = False
+        self._synthetic_feed = None
 
         # Initialize event bus
         self._event_bus = EventBus(self.settings.REDIS_URL)
@@ -415,6 +419,7 @@ class TradingEngine:
 
         Creates bridge components (connector, data_feed, order_manager, account_info)
         from factory function and establishes MT5 connection.
+        In DRY_RUN mode, falls back to synthetic data if MT5 is unavailable.
 
         CALLED BY: start()
         """
@@ -431,26 +436,43 @@ class TradingEngine:
                 create_bridge(bridge_settings)
             )
 
-            # Always connect to MT5 — we need real data
-            await self._connector.connect()
-            logger.info("mt5_bridge_connected")
-
-            # Resolve trading symbols: filter TRADING_SYMBOLS to those available
+            # Try to connect to MT5
             try:
-                available_symbols = await self._data_feed.get_symbols()
-                resolved = [s for s in TRADING_SYMBOLS if s in available_symbols]
-                if resolved:
-                    self._symbols = resolved
+                await self._connector.connect()
+                logger.info("mt5_bridge_connected")
+                self._using_synthetic = False
+            except Exception as mt5_err:
+                if self.settings.DRY_RUN:
+                    logger.warning(
+                        "mt5_unavailable_using_synthetic",
+                        error=str(mt5_err),
+                        mode="DRY_RUN with synthetic data",
+                    )
+                    self._using_synthetic = True
+                    # Wrap data_feed to use synthetic data
+                    from app.bridge.synthetic_feed import SyntheticFeed
+                    self._synthetic_feed = SyntheticFeed()
                 else:
-                    # Fallback: keep defaults, broker may still accept them
-                    logger.warning("no_trading_symbols_found_in_broker", available=available_symbols)
-                logger.info("trading_symbols_resolved", symbols=self._symbols, available=len(available_symbols))
-            except Exception as e:
-                logger.warning("symbol_resolution_failed", error=str(e), fallback=self._symbols)
+                    raise
+
+            # Resolve trading symbols
+            if not self._using_synthetic:
+                try:
+                    available_symbols = await self._data_feed.get_symbols()
+                    resolved = [s for s in TRADING_SYMBOLS if s in available_symbols]
+                    if resolved:
+                        self._symbols = resolved
+                    else:
+                        logger.warning("no_trading_symbols_found_in_broker", available=available_symbols)
+                    logger.info("trading_symbols_resolved", symbols=self._symbols, available=len(available_symbols))
+                except Exception as e:
+                    logger.warning("symbol_resolution_failed", error=str(e), fallback=self._symbols)
+            else:
+                logger.info("using_default_symbols_synthetic", symbols=self._symbols)
 
             await self._event_bus.publish(
                 event_type=EventType.MT5_CONNECTED.value,
-                data={"dry_run": self.settings.DRY_RUN, "symbols": self._symbols},
+                data={"dry_run": self.settings.DRY_RUN, "symbols": self._symbols, "synthetic": getattr(self, '_using_synthetic', False)},
                 source="engine.orchestrator",
                 severity="INFO"
             )
@@ -458,6 +480,18 @@ class TradingEngine:
         except Exception as e:
             logger.error("bridge_setup_failed", error=str(e))
             raise
+
+    async def _get_candles(self, symbol: str, timeframe: str, count: int = 200) -> pd.DataFrame:
+        """Fetch candles from MT5 or synthetic feed."""
+        if self._using_synthetic and self._synthetic_feed:
+            return self._synthetic_feed.generate_candles(symbol, timeframe, count)
+        return await self._data_feed.get_candles(symbol, timeframe, count)
+
+    async def _get_tick(self, symbol: str) -> dict:
+        """Fetch tick from MT5 or synthetic feed."""
+        if self._using_synthetic and self._synthetic_feed:
+            return self._synthetic_feed.generate_tick(symbol)
+        return await self._get_tick(symbol)
 
     def _init_risk_management(self) -> None:
         """
@@ -924,7 +958,7 @@ class TradingEngine:
                         # --- Fetch tick data for this symbol ---
                         tick_data = {"bid": None, "ask": None, "spread": None}
                         try:
-                            tick_data = await self._data_feed.get_tick(symbol)
+                            tick_data = await self._get_tick(symbol)
                         except Exception as e:
                             logger.warning("tick_fetch_failed", symbol=symbol, error=str(e))
 
@@ -936,7 +970,7 @@ class TradingEngine:
                         regime = None
 
                         try:
-                            candles_h1 = await self._data_feed.get_candles(symbol, "H1", count=200)
+                            candles_h1 = await self._get_candles(symbol, "H1", count=200)
                             if not candles_h1.empty and len(candles_h1) >= 50:
                                 close = candles_h1['close']
                                 high = candles_h1['high']
@@ -981,7 +1015,7 @@ class TradingEngine:
                         for tf in strategy_timeframes:
                             candle_key = (symbol, tf)
                             try:
-                                candles_tf = await self._data_feed.get_candles(symbol, tf, count=200)
+                                candles_tf = await self._get_candles(symbol, tf, count=200)
                                 if not candles_tf.empty and len(candles_tf) >= 2:
                                     latest_candle_time = candles_tf.index[-1]
                                     prev_time = self._last_candle_time.get(candle_key)
@@ -1713,7 +1747,7 @@ class TradingEngine:
                     tp = trade_info.get('tp', 0)
 
                     try:
-                        tick = await self._data_feed.get_tick(symbol)
+                        tick = await self._get_tick(symbol)
                     except Exception:
                         continue
 
