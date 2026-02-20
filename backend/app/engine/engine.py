@@ -449,9 +449,10 @@ class TradingEngine:
                         mode="DRY_RUN with synthetic data",
                     )
                     self._using_synthetic = True
-                    # Wrap data_feed to use synthetic data
+                    # Attach synthetic feed to data_feed for fallback
                     from app.bridge.synthetic_feed import SyntheticFeed
                     self._synthetic_feed = SyntheticFeed()
+                    self._data_feed.set_synthetic_fallback(self._synthetic_feed)
                 else:
                     raise
 

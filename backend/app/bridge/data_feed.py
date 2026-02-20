@@ -36,11 +36,13 @@ class DataFeed:
     """
     PURPOSE: Fetch OHLCV candles and tick data from MT5 REST bridge.
 
-    All data comes from the real MT5 terminal via HTTP -- no mock data.
-    DRY_RUN mode still uses live market data (only order execution is suppressed).
+    All data comes from the real MT5 terminal via HTTP. When MT5 is unavailable
+    and a synthetic_feed is attached, falls back to synthetic data.
+    DRY_RUN mode still uses live market data when available.
 
     Attributes:
         _connector: MT5Connector instance (HTTP-based)
+        _synthetic_feed: Optional SyntheticFeed for fallback when MT5 unavailable
     """
 
     def __init__(self, connector: MT5Connector, dry_run: bool = True):
@@ -53,9 +55,15 @@ class DataFeed:
                      Data feed ALWAYS uses real MT5 data.
         """
         self._connector = connector
+        self._synthetic_feed = None  # Set by engine when MT5 is unavailable
         # NOTE: dry_run is intentionally ignored for data retrieval.
         # Real prices are always fetched from MT5.
         logger.info("data_feed_initialized", dry_run=dry_run, note="always_real_data")
+
+    def set_synthetic_fallback(self, synthetic_feed) -> None:
+        """Attach a SyntheticFeed for use when MT5 is unavailable."""
+        self._synthetic_feed = synthetic_feed
+        logger.info("synthetic_fallback_attached")
 
     async def get_candles(
         self,
@@ -150,6 +158,15 @@ class DataFeed:
             return df
 
         except Exception as e:
+            # Fall back to synthetic data if available
+            if self._synthetic_feed is not None:
+                logger.info(
+                    "using_synthetic_candles",
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    reason=str(e),
+                )
+                return self._synthetic_feed.generate_candles(symbol, timeframe, count)
             logger.error(
                 "get_candles_error",
                 symbol=symbol,
@@ -194,6 +211,8 @@ class DataFeed:
             return tick
 
         except Exception as e:
+            if self._synthetic_feed is not None:
+                return self._synthetic_feed.generate_tick(symbol)
             logger.error("get_tick_error", symbol=symbol, error=str(e))
             raise ConnectionError(f"Failed to get tick for {symbol}: {e}")
 

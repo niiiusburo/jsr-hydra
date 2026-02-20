@@ -102,9 +102,10 @@ class SyntheticFeed:
         base_price = SYMBOL_BASE_PRICES.get(symbol, current_price)
 
         for i in range(1, count):
-            # Mean reversion force
-            mean_rev = -0.01 * (prices[i - 1] - base_price) / base_price
-            prices[i] = prices[i - 1] * (1 + returns[i] + mean_rev)
+            # Mean reversion force (clamped to prevent instability)
+            deviation = (prices[i - 1] - base_price) / base_price
+            mean_rev = -0.005 * max(-0.1, min(0.1, deviation))
+            prices[i] = abs(prices[i - 1] * (1 + returns[i] + mean_rev))
 
         # Generate OHLC from close prices
         now = datetime.utcnow()
