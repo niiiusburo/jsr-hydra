@@ -376,7 +376,7 @@ def assess_strategy_fitness(
     based on the current regime and indicator state.
 
     Args:
-        strategy_code: Strategy identifier (A, B, C, D)
+        strategy_code: Strategy identifier (A, B, C, D, E)
         regime: Current market regime string
         indicators: Dict with rsi, adx, atr, ema_20, ema_50
 
@@ -425,16 +425,28 @@ def assess_strategy_fitness(
         else:
             return {"confidence": 0.5, "reason": f"Regime ({regime}) is neutral for breakout strategy."}
 
-    # Strategy D — Volatility Harvester
+    # Strategy D — Momentum Scalper
     elif strategy_code == "D":
         if rsi_val is not None and (rsi_val <= 30 or rsi_val >= 70):
             conf = 0.75 if regime != "TRENDING_DOWN" or rsi_val <= 25 else 0.5
             zone = "oversold" if rsi_val <= 30 else "overbought"
-            return {"confidence": conf, "reason": f"RSI {rsi_val} is {zone} — volatility harvester setup is active."}
+            return {"confidence": conf, "reason": f"RSI {rsi_val} is {zone} — momentum scalp setup is active."}
         elif regime == "VOLATILE":
-            return {"confidence": 0.65, "reason": "High volatility regime — BB bands should widen, offering entries at extremes."}
+            return {"confidence": 0.65, "reason": "High volatility regime — momentum scalp can capture fast expansions."}
         else:
             return {"confidence": 0.35, "reason": "RSI in neutral zone, no extreme readings. Waiting for BB touch or RSI extreme."}
+
+    # Strategy E — Range Scalper (Sideways)
+    elif strategy_code == "E":
+        if regime == "RANGING":
+            return {"confidence": 0.82, "reason": "Ranging regime detected — ideal conditions for sideways scalping."}
+        if regime in ("TRANSITIONING", "QUIET"):
+            return {"confidence": 0.62, "reason": "Low directional commitment — range scalper can work with tighter risk."}
+        if regime in ("TRENDING_UP", "TRENDING_DOWN"):
+            if adx_val and adx_val >= 25:
+                return {"confidence": 0.22, "reason": f"Trend strength is elevated (ADX {adx_val}). Sideways scalps are likely to get run over."}
+            return {"confidence": 0.4, "reason": f"Directional bias exists but ADX {adx_val} is not extreme. Range scalps only at clear band extremes."}
+        return {"confidence": 0.5, "reason": f"Mixed regime ({regime}). Sideways scalper is neutral until structure is clearer."}
 
     # Unknown strategy
     return {"confidence": 0.5, "reason": f"No specific assessment for strategy {strategy_code}."}

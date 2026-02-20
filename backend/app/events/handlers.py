@@ -7,6 +7,7 @@ execution, regime changes, and system alerts.
 
 from typing import Callable
 
+from app.config.constants import EventType
 from app.events.types import EventPayload
 from app.utils.logger import get_logger
 
@@ -153,25 +154,25 @@ def register_all_handlers(bus) -> None:
     logger = get_logger("events.handlers")
 
     # Trade event handlers
-    bus.on("TRADE_OPENED", handle_trade_event)
-    bus.on("TRADE_CLOSED", handle_trade_event)
-    bus.on("TRADE_CLOSED", handle_trade_closed_update_strategy)
-    bus.on("TRADE_MODIFIED", handle_trade_event)
+    bus.on(EventType.TRADE_OPENED.value, handle_trade_event)
+    bus.on(EventType.TRADE_CLOSED.value, handle_trade_event)
+    bus.on(EventType.TRADE_CLOSED.value, handle_trade_closed_update_strategy)
+    bus.on(EventType.TRADE_MODIFIED.value, handle_trade_event)
 
     # Regime event handlers
-    bus.on("REGIME_CHANGED", handle_regime_event)
+    bus.on(EventType.REGIME_CHANGED.value, handle_regime_event)
 
     # System event handlers
-    bus.on("KILL_SWITCH_TRIGGERED", handle_system_event)
-    bus.on("DAILY_LIMIT_HIT", handle_system_event)
-    bus.on("WEEKLY_LIMIT_HIT", handle_system_event)
-    bus.on("MONTHLY_LIMIT_HIT", handle_system_event)
-    bus.on("MT5_CONNECTED", handle_system_event)
-    bus.on("MT5_DISCONNECTED", handle_system_event)
-    bus.on("MT5_CONNECTION_ERROR", handle_system_event)
-    bus.on("STRATEGY_ERROR", handle_system_event)
-    bus.on("SYSTEM_ERROR", handle_system_event)
-    bus.on("HEARTBEAT_MISSED", handle_system_event)
-    bus.on("CONFIGURATION_CHANGED", handle_system_event)
+    bus.on(EventType.KILL_SWITCH_TRIGGERED.value, handle_system_event)
+    bus.on(EventType.DAILY_LIMIT_HIT.value, handle_system_event)
+    bus.on(EventType.WEEKLY_LIMIT_HIT.value, handle_system_event)
+    bus.on(EventType.MONTHLY_LIMIT_HIT.value, handle_system_event)
+    bus.on(EventType.MT5_CONNECTED.value, handle_system_event)
+    bus.on(EventType.MT5_DISCONNECTED.value, handle_system_event)
+    bus.on(EventType.MT5_CONNECTION_ERROR.value, handle_system_event)
+    bus.on(EventType.STRATEGY_ERROR.value, handle_system_event)
+    bus.on(EventType.SYSTEM_ERROR.value, handle_system_event)
+    bus.on(EventType.HEARTBEAT_MISSED.value, handle_system_event)
+    bus.on(EventType.CONFIGURATION_CHANGED.value, handle_system_event)
 
     logger.info("all_handlers_registered")

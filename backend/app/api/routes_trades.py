@@ -8,19 +8,56 @@ creating new trades, and retrieving trade statistics. All routes use proper Pyda
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import get_current_user
 from app.db.engine import get_db
+from app.models.strategy import Strategy
 from app.models.trade import Trade
 from app.schemas import TradeCreate, TradeResponse, TradeList, TradeStats
+from app.core.rate_limit import limiter, READ_LIMIT, WRITE_LIMIT
 from app.utils.logger import get_logger
 
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/trades", tags=["trades"])
+
+
+async def _load_strategy_lookup(
+    db: AsyncSession,
+    strategy_ids: set,
+) -> dict:
+    """Load strategy code/name metadata for a set of strategy IDs."""
+    if not strategy_ids:
+        return {}
+
+    result = await db.execute(
+        select(Strategy.id, Strategy.code, Strategy.name)
+        .where(Strategy.id.in_(strategy_ids))
+    )
+    rows = result.all()
+    return {
+        strategy_id: {"code": code, "name": name}
+        for strategy_id, code, name in rows
+    }
+
+
+def _attach_strategy_metadata(
+    trade: Trade,
+    strategy_lookup: dict,
+) -> TradeResponse:
+    """Convert trade ORM model to API response including strategy code/name."""
+    trade_response = TradeResponse.model_validate(trade)
+
+    if trade.strategy_id:
+        strategy_meta = strategy_lookup.get(trade.strategy_id)
+        if strategy_meta:
+            trade_response.strategy_code = strategy_meta.get("code")
+            trade_response.strategy_name = strategy_meta.get("name")
+
+    return trade_response
 
 
 # ════════════════════════════════════════════════════════════════
@@ -29,13 +66,16 @@ router = APIRouter(prefix="/trades", tags=["trades"])
 
 
 @router.get("", response_model=TradeList)
+@limiter.limit(READ_LIMIT)
 async def list_trades(
+    request: Request,
     page: int = Query(1, ge=1, description="Page number (1-indexed)"),
     per_page: int = Query(20, ge=1, le=100, description="Trades per page"),
     status_filter: Optional[str] = Query(None, description="Filter by status (open/closed)"),
     strategy_filter: Optional[str] = Query(None, description="Filter by strategy code"),
     symbol_filter: Optional[str] = Query(None, description="Filter by symbol"),
     days_ago: Optional[int] = Query(None, ge=0, description="Trades from last N days"),
+    _current_user: str = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> TradeList:
     """
@@ -67,8 +107,7 @@ async def list_trades(
             filters.append(Trade.status == status_filter.upper())
 
         if strategy_filter:
-            from app.models.strategy import Strategy
-            strategy_subq = select(Strategy.id).where(Strategy.code == strategy_filter).scalar_subquery()
+            strategy_subq = select(Strategy.id).where(Strategy.code == strategy_filter.upper()).scalar_subquery()
             filters.append(Trade.strategy_id == strategy_subq)
 
         if symbol_filter:
@@ -98,6 +137,10 @@ async def list_trades(
 
         result = await db.execute(query_stmt)
         trades = result.scalars().all()
+        strategy_lookup = await _load_strategy_lookup(
+            db,
+            {trade.strategy_id for trade in trades if trade.strategy_id},
+        )
 
         logger.info(
             "trades_listed",
@@ -109,7 +152,7 @@ async def list_trades(
         )
 
         return TradeList(
-            trades=[TradeResponse.model_validate(t) for t in trades],
+            trades=[_attach_strategy_metadata(t, strategy_lookup) for t in trades],
             total=total,
             page=page,
             per_page=per_page,
@@ -134,9 +177,12 @@ async def list_trades(
 
 
 @router.get("/stats/summary", response_model=TradeStats)
+@limiter.limit(READ_LIMIT)
 async def get_trade_stats(
+    request: Request,
     days_ago: Optional[int] = Query(None, ge=0, description="Stats for last N days"),
     strategy_filter: Optional[str] = Query(None, description="Filter by strategy code"),
+    _current_user: str = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> TradeStats:
     """
@@ -260,8 +306,11 @@ async def get_trade_stats(
 
 
 @router.get("/{trade_id}", response_model=TradeResponse)
+@limiter.limit(READ_LIMIT)
 async def get_trade(
+    request: Request,
     trade_id: str,
+    _current_user: str = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> TradeResponse:
     """
@@ -292,8 +341,13 @@ async def get_trade(
                 detail="Trade not found"
             )
 
+        strategy_lookup = await _load_strategy_lookup(
+            db,
+            {trade.strategy_id} if trade.strategy_id else set(),
+        )
+
         logger.info("trade_retrieved", trade_id=trade_id)
-        return TradeResponse.model_validate(trade)
+        return _attach_strategy_metadata(trade, strategy_lookup)
 
     except HTTPException:
         raise
@@ -315,7 +369,9 @@ async def get_trade(
 
 
 @router.post("", response_model=TradeResponse)
+@limiter.limit(WRITE_LIMIT)
 async def create_trade(
+    request: Request,
     trade_data: TradeCreate,
     current_user: str = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -337,7 +393,6 @@ async def create_trade(
         HTTPException: If trade creation fails or validation error
     """
     try:
-        from app.models.strategy import Strategy
         from app.models.account import MasterAccount
         from app.config.settings import settings
 
@@ -353,7 +408,7 @@ async def create_trade(
         # Resolve strategy_code to strategy_id
         strategy_id = None
         if trade_data.strategy_code:
-            stmt = select(Strategy).where(Strategy.code == trade_data.strategy_code)
+            stmt = select(Strategy).where(Strategy.code == trade_data.strategy_code.upper())
             result = await db.execute(stmt)
             strategy = result.scalar_one_or_none()
             if strategy:
@@ -389,7 +444,11 @@ async def create_trade(
             direction=new_trade.direction
         )
 
-        return TradeResponse.model_validate(new_trade)
+        strategy_lookup = await _load_strategy_lookup(
+            db,
+            {new_trade.strategy_id} if new_trade.strategy_id else set(),
+        )
+        return _attach_strategy_metadata(new_trade, strategy_lookup)
 
     except Exception as e:
         await db.rollback()

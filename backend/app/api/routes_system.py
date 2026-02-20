@@ -11,14 +11,15 @@ from datetime import datetime
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import get_current_user
+from app.config.constants import EventType
 from app.config.settings import settings
 from app.db.engine import get_db
-from app.models.account import MasterAccount
+from app.models.account import MasterAccount, EquitySnapshot
 from app.models.strategy import Strategy
 from app.models.trade import Trade
 from app.models.system import SystemHealth
@@ -26,6 +27,7 @@ from app.schemas import HealthCheck, VersionInfo, DashboardSummary
 from app.schemas.account import AccountResponse
 from app.schemas.strategy import StrategyMetrics
 from app.services.regime_service import RegimeService
+from app.core.rate_limit import limiter, READ_LIMIT, WRITE_LIMIT
 from app.utils.logger import get_logger
 from app.version import get_version
 
@@ -36,6 +38,217 @@ router = APIRouter(prefix="/system", tags=["system"])
 _startup_time = time.time()
 
 MT5_REST_URL = getattr(settings, "MT5_REST_URL", "http://jsr-mt5:18812")
+
+
+def _build_open_position_sync(
+    mt5_positions: list[dict],
+    db_positions: list[dict],
+) -> tuple[list[dict], str]:
+    """
+    Pick the position source used by dashboard cards/tables.
+
+    Priority:
+    1) Merge MT5 + DB OPEN trades when both exist (dedupe by ticket).
+    2) Fallback to whichever source is available.
+    """
+    if mt5_positions and db_positions:
+        merged = list(mt5_positions)
+        mt5_tickets = {
+            str(pos.get("ticket"))
+            for pos in mt5_positions
+            if pos.get("ticket") is not None
+        }
+
+        appended = 0
+        for db_pos in db_positions:
+            db_ticket = db_pos.get("ticket")
+            if db_ticket is not None and str(db_ticket) in mt5_tickets:
+                continue
+            merged.append(db_pos)
+            appended += 1
+
+        if appended > 0:
+            return merged, "hybrid"
+        return merged, "mt5"
+
+    if mt5_positions:
+        return mt5_positions, "mt5"
+    if db_positions:
+        return db_positions, "db"
+    return [], "none"
+
+
+def _resolve_open_position_count(mt5_count: int, db_count: int) -> tuple[int, str]:
+    """
+    Build a unified count for UI while keeping source diagnostics.
+
+    We use the maximum so pages do not show fewer opens just because one
+    provider lags (e.g., bridge temporarily unavailable).
+    """
+    unified = max(mt5_count, db_count)
+    if mt5_count == db_count:
+        return unified, "mt5+db"
+    if mt5_count > db_count:
+        return unified, "mt5"
+    return unified, "db"
+
+
+async def _get_db_open_trade_rows(db: AsyncSession) -> list[Trade]:
+    """Return all OPEN trades from DB ordered by newest first."""
+    result = await db.execute(
+        select(Trade)
+        .where(Trade.status == "OPEN")
+        .order_by(Trade.opened_at.desc())
+    )
+    return result.scalars().all()
+
+
+async def _load_strategy_lookup(
+    db: AsyncSession,
+    strategy_ids: set[str],
+) -> dict[str, dict]:
+    """Load strategy code/name metadata for a set of strategy IDs."""
+    clean_ids = {sid for sid in strategy_ids if sid}
+    if not clean_ids:
+        return {}
+
+    result = await db.execute(
+        select(Strategy.id, Strategy.code, Strategy.name)
+        .where(Strategy.id.in_(clean_ids))
+    )
+    rows = result.all()
+    return {
+        str(strategy_id): {"code": code, "name": name}
+        for strategy_id, code, name in rows
+    }
+
+
+async def _load_symbol_ticks(symbols: set[str]) -> dict[str, dict]:
+    """Fetch live ticks for a symbol set from the MT5 bridge."""
+    clean_symbols = sorted({s for s in symbols if s})
+    if not clean_symbols:
+        return {}
+
+    responses = await asyncio.gather(
+        *[_mt5_request(f"/tick/{symbol}") for symbol in clean_symbols],
+        return_exceptions=True,
+    )
+
+    ticks: dict[str, dict] = {}
+    for symbol, response in zip(clean_symbols, responses):
+        if isinstance(response, dict) and (
+            response.get("bid") is not None or response.get("ask") is not None
+        ):
+            ticks[symbol] = response
+    return ticks
+
+
+def _select_mark_price(direction: str, tick: Optional[dict]) -> Optional[float]:
+    """Select a realistic mark/close price from tick for BUY/SELL."""
+    if not tick:
+        return None
+
+    is_buy = (direction or "").upper() == "BUY"
+    preferred = tick.get("bid") if is_buy else tick.get("ask")
+    fallback = tick.get("ask") if is_buy else tick.get("bid")
+    raw_price = preferred if preferred is not None else fallback
+
+    if raw_price is None:
+        return None
+
+    try:
+        return float(raw_price)
+    except (TypeError, ValueError):
+        return None
+
+
+def _estimate_open_profit(
+    *,
+    symbol: str,
+    direction: str,
+    lots: float,
+    entry_price: float,
+    current_price: float,
+) -> float:
+    """Estimate unrealized profit from entry/current price using engine conventions."""
+    point_diff = current_price - entry_price
+    if (direction or "").upper() == "SELL":
+        point_diff = -point_diff
+
+    # Mirror close-profit conventions in engine.py for consistency.
+    if "JPY" in symbol:
+        pip_value = 100.0
+    elif "XAU" in symbol:
+        pip_value = 100.0
+    else:
+        pip_value = 100000.0
+
+    return round(point_diff * lots * pip_value, 2)
+
+
+def _map_open_trades_to_positions(
+    trades: list[Trade],
+    ticks_by_symbol: dict[str, dict],
+    strategy_lookup: dict[str, dict],
+) -> list[dict]:
+    """Normalize DB OPEN trades into dashboard position rows with estimated live PnL."""
+    positions: list[dict] = []
+    for trade in trades:
+        ticket = trade.mt5_ticket
+        if ticket is None:
+            ticket = f"DB-{str(trade.id)[:8]}"
+
+        direction = (trade.direction or "").upper()
+        symbol = trade.symbol or ""
+        entry_price = float(trade.entry_price or 0.0)
+        lots = float(trade.lots or 0.0)
+
+        tick = ticks_by_symbol.get(symbol)
+        current_price = _select_mark_price(direction, tick)
+        estimated_profit = None
+        if current_price is not None and lots > 0:
+            estimated_profit = _estimate_open_profit(
+                symbol=symbol,
+                direction=direction,
+                lots=lots,
+                entry_price=entry_price,
+                current_price=current_price,
+            )
+
+        strategy_key = str(trade.strategy_id) if trade.strategy_id else ""
+        strategy_meta = strategy_lookup.get(strategy_key, {})
+        strategy_code = strategy_meta.get("code")
+        strategy_name = strategy_meta.get("name")
+
+        positions.append({
+            "ticket": ticket,
+            "symbol": symbol,
+            "type": direction,
+            "lots": lots,
+            "price_open": entry_price,
+            "price_current": current_price,
+            "profit": estimated_profit,
+            "strategy_code": strategy_code,
+            "strategy_name": strategy_name,
+            "opened_at": trade.opened_at.isoformat() if trade.opened_at else None,
+            "source": "DB_ESTIMATE" if current_price is not None else "DB",
+        })
+
+    return positions
+
+
+def _sum_position_profit(positions: list[dict]) -> float:
+    """Sum available position profits safely."""
+    total = 0.0
+    for pos in positions:
+        raw = pos.get("profit")
+        if raw is None:
+            continue
+        try:
+            total += float(raw)
+        except (TypeError, ValueError):
+            continue
+    return round(total, 2)
 
 
 async def _mt5_request(path: str, method: str = "GET", json_data: dict = None, timeout: float = 5.0):
@@ -59,7 +272,8 @@ async def _mt5_request(path: str, method: str = "GET", json_data: dict = None, t
 
 
 @router.get("/health", response_model=None, tags=["health"])
-async def health_check(db: AsyncSession = Depends(get_db)):
+@limiter.limit(READ_LIMIT)
+async def health_check(request: Request, db: AsyncSession = Depends(get_db)):
     """Comprehensive health check with all service statuses."""
     services = {}
     overall_status = "ok"
@@ -111,11 +325,27 @@ async def health_check(db: AsyncSession = Depends(get_db)):
     }
 
     # Open positions count
-    positions = await _mt5_request("/positions")
-    if positions and isinstance(positions, list):
-        trading["open_positions"] = len(positions)
-    else:
-        trading["open_positions"] = 0
+    mt5_positions = await _mt5_request("/positions")
+    mt5_open_positions = len(mt5_positions) if isinstance(mt5_positions, list) else 0
+
+    db_open_trades = 0
+    try:
+        db_open_trades = len(await _get_db_open_trade_rows(db))
+    except Exception as e:
+        logger.warning("health_db_open_trades_error", error=str(e))
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
+    unified_open_positions, open_source = _resolve_open_position_count(
+        mt5_open_positions,
+        db_open_trades,
+    )
+    trading["open_positions"] = unified_open_positions
+    trading["open_positions_mt5"] = mt5_open_positions
+    trading["open_trades_db"] = db_open_trades
+    trading["open_positions_source"] = open_source
 
     return {
         "status": overall_status,
@@ -133,7 +363,11 @@ async def health_check(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/version", response_model=VersionInfo, tags=["version"])
-async def get_system_version() -> VersionInfo:
+@limiter.limit(READ_LIMIT)
+async def get_system_version(
+    request: Request,
+    _current_user: str = Depends(get_current_user),
+) -> VersionInfo:
     """Retrieve system version information."""
     version_data = get_version()
     return VersionInfo(
@@ -149,7 +383,10 @@ async def get_system_version() -> VersionInfo:
 
 
 @router.get("/dashboard", response_model=None)
+@limiter.limit(READ_LIMIT)
 async def get_dashboard_summary(
+    request: Request,
+    _current_user: str = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Dashboard summary with real MT5 account data, positions, and strategy metrics."""
@@ -224,8 +461,43 @@ async def _build_dashboard(db: AsyncSession) -> dict:
         except Exception:
             pass
 
-    # ── Positions (already fetched in parallel above) ──
-    positions = positions_raw if isinstance(positions_raw, list) else []
+    # ── Positions: MT5 primary + DB OPEN trades fallback ──
+    mt5_positions = positions_raw if isinstance(positions_raw, list) else []
+    db_open_trade_rows: list[Trade] = []
+    db_open_positions: list[dict] = []
+    try:
+        db_open_trade_rows = await _get_db_open_trade_rows(db)
+        strategy_lookup = await _load_strategy_lookup(
+            db,
+            {str(trade.strategy_id) for trade in db_open_trade_rows if trade.strategy_id},
+        )
+        ticks_by_symbol = await _load_symbol_ticks(
+            {trade.symbol for trade in db_open_trade_rows if trade.symbol}
+        )
+        db_open_positions = _map_open_trades_to_positions(
+            db_open_trade_rows,
+            ticks_by_symbol,
+            strategy_lookup,
+        )
+    except Exception as e:
+        logger.warning("dashboard_db_open_trades_error", error=str(e))
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+
+    positions, open_positions_source = _build_open_position_sync(
+        mt5_positions,
+        db_open_positions,
+    )
+    open_positions_unified = len(positions)
+    _, open_count_source = _resolve_open_position_count(
+        len(mt5_positions),
+        len(db_open_positions),
+    )
+    floating_profit = _sum_position_profit(positions)
+    if account_data is not None and open_positions_source in {"db", "hybrid"}:
+        account_data["profit"] = floating_profit
 
     # ── Strategies from DB ──
     strategies_data = []
@@ -299,15 +571,68 @@ async def _build_dashboard(db: AsyncSession) -> dict:
     # ── Available symbols (already fetched in parallel above) ──
     symbol_names = symbols_raw if isinstance(symbols_raw, list) else []
 
+    # ── Equity curve from snapshots ──
+    equity_curve = []
+    try:
+        from datetime import timedelta
+        cutoff = datetime.utcnow() - timedelta(days=30)
+
+        # Find master account id for the snapshot query
+        master_id_val = None
+        try:
+            stmt = select(MasterAccount).limit(1)
+            result = await db.execute(stmt)
+            db_acct = result.scalar_one_or_none()
+            if db_acct:
+                master_id_val = db_acct.id
+        except Exception:
+            await db.rollback()
+
+        if master_id_val:
+            try:
+                snap_stmt = (
+                    select(EquitySnapshot)
+                    .where(
+                        EquitySnapshot.master_id == master_id_val,
+                        EquitySnapshot.timestamp >= cutoff,
+                    )
+                    .order_by(EquitySnapshot.timestamp.asc())
+                )
+                snap_result = await db.execute(snap_stmt)
+                snapshots = snap_result.scalars().all()
+                peak = 0.0
+                for snap in snapshots:
+                    if snap.equity > peak:
+                        peak = snap.equity
+                    dd = ((peak - snap.equity) / peak * 100) if peak > 0 else 0.0
+                    equity_curve.append({
+                        "timestamp": snap.timestamp.isoformat(),
+                        "equity": snap.equity,
+                        "balance": snap.balance,
+                        "margin_used": snap.margin_used,
+                        "drawdown": round(dd, 2),
+                    })
+            except Exception:
+                await db.rollback()
+    except Exception as e:
+        logger.warning("dashboard_equity_curve_error", error=str(e))
+
     # ── System status ──
     uptime = time.time() - _startup_time
 
     return {
         "account": account_data,
         "positions": positions,
+        "floating_profit": floating_profit,
+        "open_positions": open_positions_unified,
+        "open_positions_mt5": len(mt5_positions),
+        "open_trades_db": len(db_open_positions),
+        "open_positions_source": open_positions_source,
+        "open_count_source": open_count_source,
         "strategies": strategies_data,
         "recent_trades": recent_trades,
         "regime": regime_data,
+        "equity_curve": equity_curve,
         "symbols": symbol_names[:20],  # First 20 symbols
         "system_status": "RUNNING",
         "version": version,
@@ -322,7 +647,12 @@ async def _build_dashboard(db: AsyncSession) -> dict:
 
 
 @router.get("/tick/{symbol}")
-async def get_tick(symbol: str):
+@limiter.limit(READ_LIMIT)
+async def get_tick(
+    request: Request,
+    symbol: str,
+    _current_user: str = Depends(get_current_user),
+):
     """Get live tick price for a symbol (public, no auth)."""
     data = await _mt5_request(f"/tick/{symbol}")
     if data and "bid" in data:
@@ -336,7 +666,11 @@ async def get_tick(symbol: str):
 
 
 @router.get("/positions")
-async def get_positions():
+@limiter.limit(READ_LIMIT)
+async def get_positions(
+    request: Request,
+    _current_user: str = Depends(get_current_user),
+):
     """Get open positions from MT5."""
     data = await _mt5_request("/positions")
     if isinstance(data, list):
@@ -350,7 +684,9 @@ async def get_positions():
 
 
 @router.post("/kill-switch", status_code=status.HTTP_200_OK)
+@limiter.limit(WRITE_LIMIT)
 async def trigger_kill_switch(
+    request: Request,
     reason: str = "Manual kill switch triggered",
     current_user: str = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -374,7 +710,7 @@ async def trigger_kill_switch(
     try:
         from app.events.bus import get_event_bus
         bus = get_event_bus()
-        await bus.publish("KILL_SWITCH_TRIGGERED", {
+        await bus.publish(EventType.KILL_SWITCH_TRIGGERED.value, {
             "reason": reason,
             "positions_closed": positions_closed,
             "triggered_by": current_user,
@@ -392,7 +728,9 @@ async def trigger_kill_switch(
 
 
 @router.post("/kill-switch/reset", status_code=status.HTTP_200_OK)
+@limiter.limit(WRITE_LIMIT)
 async def reset_kill_switch(
+    request: Request,
     current_user: str = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -405,7 +743,7 @@ async def reset_kill_switch(
     try:
         from app.events.bus import get_event_bus
         bus = get_event_bus()
-        await bus.publish("KILL_SWITCH_RESET", {
+        await bus.publish(EventType.KILL_SWITCH_RESET.value, {
             "reset_by": current_user,
             "timestamp": datetime.utcnow().isoformat(),
         })

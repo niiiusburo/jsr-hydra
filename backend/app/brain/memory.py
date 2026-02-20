@@ -13,12 +13,12 @@ import os
 from datetime import datetime, timezone
 from typing import Optional
 
+from app.brain.paths import resolve_brain_state_path
 from app.utils.logger import get_logger
 
 logger = get_logger("brain.memory")
 
-MEMORY_FILE_PATH = "/app/data/brain/memory.json"
-os.makedirs(os.path.dirname(MEMORY_FILE_PATH), exist_ok=True)
+MEMORY_FILE_PATH = resolve_brain_state_path("memory.json")
 
 
 def get_memory_path() -> str:

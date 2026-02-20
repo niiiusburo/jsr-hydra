@@ -15,6 +15,7 @@ from decimal import Decimal
 from sqlalchemy import select, func, and_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config.constants import EventType
 from app.models.trade import Trade
 from app.models.strategy import Strategy
 from app.schemas.trade import TradeCreate, TradeUpdate, TradeResponse, TradeList, TradeStats
@@ -118,7 +119,7 @@ class TradeService:
             try:
                 event_bus = get_event_bus()
                 await event_bus.publish(
-                    event_type="TRADE_OPENED",
+                    event_type=EventType.TRADE_OPENED.value,
                     data={
                         "trade_id": str(trade.id),
                         "master_id": str(master_id),
@@ -372,7 +373,7 @@ class TradeService:
                 try:
                     event_bus = get_event_bus()
                     await event_bus.publish(
-                        event_type="TRADE_CLOSED",
+                        event_type=EventType.TRADE_CLOSED.value,
                         data={
                             "trade_id": str(trade.id),
                             "master_id": str(trade.master_id),

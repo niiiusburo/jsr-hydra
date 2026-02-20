@@ -14,6 +14,7 @@ CALLED BY:
 import httpx
 from typing import Optional
 
+from app.config.constants import EventType
 from app.utils.logger import get_logger
 from app.utils.decorators import CircuitBreaker, retry
 
@@ -92,7 +93,7 @@ class MT5Connector:
                 from app.events.bus import get_event_bus
                 bus = get_event_bus()
                 await bus.publish(
-                    event_type="MT5_CONNECTED",
+                    event_type=EventType.MT5_CONNECTED.value,
                     data={"base_url": self._base_url},
                     source="bridge.connector",
                     severity="INFO",
@@ -129,7 +130,7 @@ class MT5Connector:
             from app.events.bus import get_event_bus
             bus = get_event_bus()
             await bus.publish(
-                event_type="MT5_DISCONNECTED",
+                event_type=EventType.MT5_DISCONNECTED.value,
                 data={"base_url": self._base_url},
                 source="bridge.connector",
                 severity="WARNING",

@@ -3,7 +3,7 @@
 Import all models here so Alembic can detect them during migration generation.
 """
 
-from app.models.account import MasterAccount, FollowerAccount
+from app.models.account import MasterAccount, FollowerAccount, EquitySnapshot
 from app.models.trade import Trade
 from app.models.strategy import Strategy
 from app.models.regime import RegimeState
@@ -14,6 +14,7 @@ from app.models.system import EventLog, SystemHealth
 __all__ = [
     "MasterAccount",
     "FollowerAccount",
+    "EquitySnapshot",
     "Trade",
     "Strategy",
     "RegimeState",

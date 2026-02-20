@@ -14,6 +14,7 @@ from typing import Set
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config.constants import EventType
 from app.db.engine import get_db
 from app.events.bus import get_event_bus
 from app.events.types import EventPayload
@@ -143,12 +144,12 @@ async def websocket_live_updates(
 
         # Subscribe to all events
         # NOTE: In production, could filter by event type based on client request
-        event_bus.on("TRADE_OPENED", event_handler)
-        event_bus.on("TRADE_CLOSED", event_handler)
-        event_bus.on("REGIME_CHANGED", event_handler)
-        event_bus.on("ALLOCATION_CHANGED", event_handler)
-        event_bus.on("KILL_SWITCH_TRIGGERED", event_handler)
-        event_bus.on("DAILY_LIMIT_HIT", event_handler)
+        event_bus.on(EventType.TRADE_OPENED.value, event_handler)
+        event_bus.on(EventType.TRADE_CLOSED.value, event_handler)
+        event_bus.on(EventType.REGIME_CHANGED.value, event_handler)
+        event_bus.on(EventType.ALLOCATION_CHANGED.value, event_handler)
+        event_bus.on(EventType.KILL_SWITCH_TRIGGERED.value, event_handler)
+        event_bus.on(EventType.DAILY_LIMIT_HIT.value, event_handler)
 
         # Listen for client messages (heartbeat, subscriptions, etc)
         while True:
@@ -256,10 +257,10 @@ async def setup_ws_event_handlers(bus) -> None:
         """Forward regime-change events to all connected WebSocket clients."""
         await broadcast_event(payload)
 
-    bus.on("TRADE_OPENED", ws_trade_handler)
-    bus.on("TRADE_CLOSED", ws_trade_handler)
-    bus.on("REGIME_CHANGED", ws_regime_handler)
-    bus.on("KILL_SWITCH_TRIGGERED", ws_trade_handler)
+    bus.on(EventType.TRADE_OPENED.value, ws_trade_handler)
+    bus.on(EventType.TRADE_CLOSED.value, ws_trade_handler)
+    bus.on(EventType.REGIME_CHANGED.value, ws_regime_handler)
+    bus.on(EventType.KILL_SWITCH_TRIGGERED.value, ws_trade_handler)
 
     logger.info("ws_event_handlers_registered")
 

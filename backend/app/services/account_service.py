@@ -14,7 +14,7 @@ from typing import Optional
 from sqlalchemy import select, func, and_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.account import MasterAccount
+from app.models.account import MasterAccount, EquitySnapshot
 from app.models.trade import Trade
 from app.schemas.account import AccountResponse
 from app.events.bus import get_event_bus
@@ -221,10 +221,12 @@ class AccountService:
         days: int = 30
     ) -> list[dict]:
         """
-        Generate equity curve data for a master account over a period.
+        Retrieve equity curve from periodic snapshots recorded by the engine.
 
-        PURPOSE: Retrieve historical equity values for charting and performance
-        analysis. Data points are extracted from closed trades' profit sequence.
+        PURPOSE: Return historical equity values for charting and performance
+        analysis.  Data comes from the ``equity_snapshots`` table which the
+        engine populates every ~5 minutes.  Falls back to trade-based
+        reconstruction if no snapshots exist yet.
 
         CALLED BY: Dashboard endpoint, equity chart endpoints
 
@@ -235,10 +237,11 @@ class AccountService:
 
         Returns:
             list[dict]: List of data points with keys:
-                - timestamp: Datetime of the point
+                - timestamp: ISO-8601 datetime string
                 - equity: Equity value at that time
                 - balance: Balance at that time
-                - drawdown: Drawdown percentage
+                - margin_used: Margin in use at that time
+                - drawdown: Drawdown percentage from peak
         """
         logger.info(
             "get_equity_curve_started",
@@ -247,7 +250,49 @@ class AccountService:
         )
 
         try:
-            # Get account for starting values
+            end_date = datetime.utcnow()
+            start_date = end_date - timedelta(days=days)
+
+            # --- Try snapshot-based curve first ---
+            try:
+                stmt = (
+                    select(EquitySnapshot)
+                    .where(
+                        and_(
+                            EquitySnapshot.master_id == master_id,
+                            EquitySnapshot.timestamp >= start_date,
+                        )
+                    )
+                    .order_by(EquitySnapshot.timestamp.asc())
+                )
+                result = await db.execute(stmt)
+                snapshots = result.scalars().all()
+            except Exception:
+                # Table may not exist yet (pre-migration)
+                snapshots = []
+
+            if snapshots:
+                curve = []
+                peak = 0.0
+                for snap in snapshots:
+                    if snap.equity > peak:
+                        peak = snap.equity
+                    dd = ((peak - snap.equity) / peak * 100) if peak > 0 else 0.0
+                    curve.append({
+                        "timestamp": snap.timestamp.isoformat(),
+                        "equity": snap.equity,
+                        "balance": snap.balance,
+                        "margin_used": snap.margin_used,
+                        "drawdown": round(dd, 2),
+                    })
+                logger.info(
+                    "equity_curve_from_snapshots",
+                    master_id=str(master_id),
+                    points=len(curve),
+                )
+                return curve
+
+            # --- Fallback: reconstruct from closed trades ---
             stmt = select(MasterAccount).where(MasterAccount.id == master_id)
             result = await db.execute(stmt)
             account = result.scalar_one_or_none()
@@ -256,62 +301,55 @@ class AccountService:
                 logger.error("account_not_found", master_id=str(master_id))
                 return []
 
-            # Calculate period
-            end_date = datetime.utcnow()
-            start_date = end_date - timedelta(days=days)
-
-            # Get all closed trades in period
-            stmt = select(Trade).where(
-                and_(
-                    Trade.master_id == master_id,
-                    Trade.status == "CLOSED",
-                    Trade.closed_at >= start_date,
-                    Trade.closed_at <= end_date
+            stmt = (
+                select(Trade)
+                .where(
+                    and_(
+                        Trade.master_id == master_id,
+                        Trade.status == "CLOSED",
+                        Trade.closed_at >= start_date,
+                        Trade.closed_at <= end_date,
+                    )
                 )
-            ).order_by(Trade.closed_at)
-
+                .order_by(Trade.closed_at)
+            )
             result = await db.execute(stmt)
             trades = result.scalars().all()
 
-            # Build equity curve from trades
             curve = []
             running_equity = account.balance
             running_peak = account.balance
-            previous_timestamp = start_date
 
             if trades:
                 for trade in trades:
                     running_equity += trade.net_profit
                     if running_equity > running_peak:
                         running_peak = running_equity
-
-                    drawdown = ((running_peak - running_equity) / running_peak * 100) if running_peak > 0 else 0.0
-
+                    dd = ((running_peak - running_equity) / running_peak * 100) if running_peak > 0 else 0.0
                     curve.append({
                         "timestamp": trade.closed_at.isoformat(),
                         "equity": running_equity,
                         "balance": account.balance,
-                        "drawdown": drawdown
+                        "margin_used": 0.0,
+                        "drawdown": round(dd, 2),
                     })
             else:
-                # No trades, return current state
-                drawdown = 0.0
+                dd = 0.0
                 if account.peak_equity > 0:
-                    drawdown = ((account.peak_equity - account.equity) / account.peak_equity) * 100
-
+                    dd = ((account.peak_equity - account.equity) / account.peak_equity) * 100
                 curve.append({
                     "timestamp": end_date.isoformat(),
                     "equity": account.equity,
                     "balance": account.balance,
-                    "drawdown": drawdown
+                    "margin_used": 0.0,
+                    "drawdown": round(dd, 2),
                 })
 
             logger.info(
-                "equity_curve_generated",
+                "equity_curve_from_trades_fallback",
                 master_id=str(master_id),
-                points=len(curve)
+                points=len(curve),
             )
-
             return curve
 
         except Exception as e:

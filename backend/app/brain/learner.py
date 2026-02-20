@@ -20,6 +20,7 @@ from typing import Optional
 
 from app.brain import memory
 from app.brain import patterns
+from app.brain.paths import resolve_brain_state_path
 from app.utils.logger import get_logger
 
 logger = get_logger("brain.learner")
@@ -47,16 +48,17 @@ RL_LOSS_STREAK_OVERRIDE = 4
 RL_EXPLORATION_RATE = 0.10
 
 # RL state persistence path
-RL_STATE_PATH = "/app/data/brain/rl_state.json"
-os.makedirs(os.path.dirname(RL_STATE_PATH), exist_ok=True)
+RL_STATE_PATH = resolve_brain_state_path("rl_state.json")
 
 # Strategy descriptions for insight generation
 STRATEGY_NAMES = {
     "A": "Trend Following",
     "B": "Mean Reversion",
     "C": "Session Breakout",
-    "D": "Volatility Harvester",
+    "D": "Momentum Scalper",
+    "E": "Range Scalper (Sideways)",
 }
+STRATEGY_CODES = tuple(STRATEGY_NAMES.keys())
 
 
 def _rsi_zone(rsi: Optional[float]) -> str:
@@ -120,7 +122,7 @@ class ParameterAdapter:
         the preset with the highest sample value.
 
         Args:
-            strategy: Strategy code (A, B, C, D).
+            strategy: Strategy code (A, B, C, D, E).
             regime: Current market regime string.
 
         Returns:
@@ -275,7 +277,9 @@ class BrainLearner:
             "session_stats": {},
             "rsi_zone_stats": {},
             "insights": [],
-            "confidence_adjustments": {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0},
+            "confidence_adjustments": {
+                code: 0.0 for code in STRATEGY_CODES
+            },
         }
 
     @property
@@ -747,7 +751,9 @@ class BrainLearner:
         and Thompson Sampling expected values.
         """
         history = self._state.get("trade_history", [])
-        adjustments = {"A": 0.0, "B": 0.0, "C": 0.0, "D": 0.0}
+        adjustments = {
+            code: 0.0 for code in STRATEGY_CODES
+        }
 
         if not history:
             self._state["confidence_adjustments"] = adjustments
@@ -825,7 +831,7 @@ class BrainLearner:
 
         result = {}
 
-        for strat in ("A", "B", "C", "D"):
+        for strat in STRATEGY_CODES:
             adj = adjustments.get(strat, 0.0)
             streak_data = streaks.get(strat, {})
 
@@ -914,7 +920,7 @@ class BrainLearner:
         4. RSI zone performance -> override if historically terrible
 
         Args:
-            strategy_code: Strategy code (A, B, C, D).
+            strategy_code: Strategy code (A, B, C, D, E).
             regime: Current market regime.
             indicators: Current indicator values dict (rsi, adx, etc.).
 

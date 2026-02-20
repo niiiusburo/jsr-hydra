@@ -15,14 +15,13 @@ import os
 from datetime import datetime, timezone
 from typing import Optional
 
+from app.brain.paths import resolve_brain_state_path
 from app.utils.logger import get_logger
 
 logger = get_logger("brain.strategy_xp")
 
 # Persistence path
-XP_STATE_PATH = "/app/data/brain/strategy_xp.json"
-import os as _os
-_os.makedirs(_os.path.dirname(XP_STATE_PATH), exist_ok=True)
+XP_STATE_PATH = resolve_brain_state_path("strategy_xp.json")
 
 # Strategy metadata
 STRATEGY_NAMES = {
@@ -30,6 +29,7 @@ STRATEGY_NAMES = {
     "B": "Mean Reversion",
     "C": "Session Breakout",
     "D": "Momentum Scalper",
+    "E": "Range Scalper (Sideways)",
 }
 
 
@@ -572,7 +572,7 @@ class StrategyXP:
 
     def get_all_xp(self) -> dict:
         """
-        Return XP data for all 4 strategies.
+        Return XP data for all configured strategies.
 
         Returns:
             dict: {strategy_code: strategy_xp_state}
@@ -580,7 +580,7 @@ class StrategyXP:
         CALLED BY: api/routes_brain.py /strategy-xp endpoint
         """
         # Ensure all strategies exist
-        for code in ("A", "B", "C", "D"):
+        for code in ("A", "B", "C", "D", "E"):
             self._ensure_strategy(code)
 
         return {

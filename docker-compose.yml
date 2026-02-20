@@ -97,12 +97,18 @@ services:
     ports:
       - "8000:8000"
     environment:
+      - APP_ENV=${APP_ENV:-development}
       - DATABASE_URL=postgresql+asyncpg://${DB_USER:-postgres}:${DB_PASS:-postgres}@jsr-postgres:5432/jsr_hydra
       - REDIS_URL=redis://jsr-redis:6379/0
       - MT5_HOST=jsr-mt5
       - MT5_RPYC_PORT=18812
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1/chat/completions}
+      - ZAI_API_KEY=${ZAI_API_KEY:-}
+      - ZAI_MODEL=${ZAI_MODEL:-glm-4.6}
+      - ZAI_BASE_URL=${ZAI_BASE_URL:-https://api.z.ai/api/paas/v4/chat/completions}
+      - BRAIN_LLM_PROVIDER=${BRAIN_LLM_PROVIDER:-openai}
     env_file:
       - .env
     volumes:
@@ -139,12 +145,18 @@ services:
     container_name: jsr-engine
     command: python -m app.engine.engine_runner
     environment:
+      - APP_ENV=${APP_ENV:-development}
       - DATABASE_URL=postgresql+asyncpg://${DB_USER:-postgres}:${DB_PASS:-postgres}@jsr-postgres:5432/jsr_hydra
       - REDIS_URL=redis://jsr-redis:6379/0
       - MT5_HOST=jsr-mt5
       - MT5_RPYC_PORT=18812
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1/chat/completions}
+      - ZAI_API_KEY=${ZAI_API_KEY:-}
+      - ZAI_MODEL=${ZAI_MODEL:-glm-4.6}
+      - ZAI_BASE_URL=${ZAI_BASE_URL:-https://api.z.ai/api/paas/v4/chat/completions}
+      - BRAIN_LLM_PROVIDER=${BRAIN_LLM_PROVIDER:-openai}
     env_file:
       - .env
     depends_on:
@@ -173,13 +185,18 @@ services:
     networks:
       - jsr-network
 
-  # Placeholder service — not yet implemented; kept at minimal resource footprint
+  # NOT YET IMPLEMENTED (Phase 3) — RL model retrainer.
+  # This service is gated behind the "retrainer" profile so it will NOT start
+  # with a normal `docker compose up`. To run it explicitly:
+  #   docker compose --profile retrainer up jsr-retrainer
+  # The retrainer will exit gracefully if no RL state / model files exist yet.
   jsr-retrainer:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: jsr-retrainer
     command: python -m app.engine.retrainer
+    profiles: ["retrainer"]
     environment:
       - DATABASE_URL=postgresql+asyncpg://${DB_USER:-postgres}:${DB_PASS:-postgres}@jsr-postgres:5432/jsr_hydra
       - REDIS_URL=redis://jsr-redis:6379/0
@@ -188,7 +205,7 @@ services:
     depends_on:
       jsr-backend:
         condition: service_started
-    restart: unless-stopped
+    restart: on-failure  # Don't restart on clean exit (exit 0 = no data to retrain)
     deploy:
       resources:
         limits:

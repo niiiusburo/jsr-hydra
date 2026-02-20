@@ -18,14 +18,13 @@ import os
 from datetime import datetime, timezone
 from typing import Optional
 
+from app.brain.paths import resolve_brain_state_path
 from app.utils.logger import get_logger
 
 logger = get_logger("brain.auto_allocator")
 
 # Persistence path for auto-allocation state
-AUTO_ALLOC_STATE_PATH = "/app/data/brain/auto_allocation.json"
-import os as _os
-_os.makedirs(_os.path.dirname(AUTO_ALLOC_STATE_PATH), exist_ok=True)
+AUTO_ALLOC_STATE_PATH = resolve_brain_state_path("auto_allocation.json")
 
 # How often to rebalance (every N trades across all strategies)
 REBALANCE_INTERVAL = 10

@@ -66,6 +66,7 @@ class StrategyCode(str, Enum):
     B = "B"
     C = "C"
     D = "D"
+    E = "E"
 
 
 class StrategyStatus(str, Enum):

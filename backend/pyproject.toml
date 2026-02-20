@@ -24,6 +24,7 @@ dependencies = [
     "python-jose[cryptography]",
     "passlib[bcrypt]",
     "python-multipart",
+    "slowapi",
 ]
 
 [project.optional-dependencies]

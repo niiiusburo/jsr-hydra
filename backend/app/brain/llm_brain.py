@@ -1,7 +1,8 @@
 """
-PURPOSE: OpenAI GPT-powered trading intelligence.
-Uses GPT-4o-mini for cost-efficient market analysis, trade review,
-and strategy improvement suggestions.
+PURPOSE: LLM-powered trading intelligence.
+Supports OpenAI-compatible chat completion endpoints so the Brain can
+switch between providers (for example OpenAI and Z.AI) without changing
+core analysis logic.
 
 NOT called every cycle -- called on specific triggers to save costs:
 1. Every 15 minutes: Market analysis summary
@@ -24,9 +25,10 @@ logger = get_logger("brain.llm")
 
 class LLMBrain:
     """
-    PURPOSE: GPT-powered trading intelligence layer for JSR Hydra Brain.
+    PURPOSE: LLM-powered trading intelligence layer for JSR Hydra Brain.
 
-    Makes cost-efficient calls to OpenAI GPT-4o-mini for market analysis,
+    Makes cost-efficient calls to a configured OpenAI-compatible endpoint
+    for market analysis,
     trade review, strategy optimization, and regime change analysis.
     All calls are rate-limited internally to prevent excessive API usage.
 
@@ -35,29 +37,83 @@ class LLMBrain:
         - api/routes_brain.py (get insights, get stats)
     """
 
-    def __init__(self, api_key: str, model: str = "gpt-4o-mini"):
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "gpt-4o-mini",
+        provider: str = "openai",
+        base_url: str = "https://api.openai.com/v1/chat/completions",
+    ):
         self._api_key = api_key
         self._model = model
-        self._base_url = "https://api.openai.com/v1/chat/completions"
+        self._provider = provider
+        self._base_url = base_url
         self._last_analysis_time = 0
         self._last_review_time = 0
         self._analysis_interval = 900  # 15 minutes
         self._review_interval = 3600   # 1 hour
+        self._loss_diagnosis_interval = 1200  # 20 minutes
         self._total_tokens_used = 0
         self._total_calls = 0
+        self._last_loss_diagnosis_time = 0
         self._insights_history: List[Dict] = []  # Rolling list of LLM insights
         self._max_insights = 50
 
         logger.info(
             "llm_brain_initialized",
+            provider=provider,
             model=model,
+            base_url=base_url,
             analysis_interval=self._analysis_interval,
             review_interval=self._review_interval,
         )
 
+    def _normalize_error_message(self, raw_message: Optional[str], fallback: str) -> str:
+        """Normalize message text so dashboard errors are never blank."""
+        msg = " ".join(str(raw_message or "").strip().split())
+        return msg[:240] if msg else fallback
+
+    def _extract_http_error_detail(self, response: httpx.Response) -> str:
+        """Extract a meaningful detail from non-2xx provider responses."""
+        fallback = f"HTTP {response.status_code}"
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                if isinstance(payload.get("error"), dict):
+                    maybe_msg = payload["error"].get("message")
+                    return self._normalize_error_message(maybe_msg, fallback=fallback)
+                for key in ("message", "detail"):
+                    if payload.get(key):
+                        return self._normalize_error_message(payload.get(key), fallback=fallback)
+            if isinstance(payload, list) and payload:
+                return self._normalize_error_message(str(payload[0]), fallback=fallback)
+        except Exception:
+            pass
+        return self._normalize_error_message(response.text, fallback=fallback)
+
+    def _is_error_content(self, content: str) -> bool:
+        return str(content or "").strip().startswith("[LLM Error")
+
+    def _build_insight(self, insight_type: str, content: str, **extras: object) -> Dict:
+        """Create a normalized insight payload with explicit error markers."""
+        insight: Dict[str, object] = {
+            "type": insight_type,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "content": content,
+            "model": self._model,
+            "provider": self._provider,
+            "is_error": self._is_error_content(content),
+        }
+        if insight["is_error"]:
+            insight["error_message"] = content
+        for key, value in extras.items():
+            if value is not None:
+                insight[key] = value
+        return insight
+
     async def _call_gpt(self, system_prompt: str, user_prompt: str, max_tokens: int = 500) -> Optional[str]:
         """
-        PURPOSE: Make an async call to OpenAI API.
+        PURPOSE: Make an async call to an OpenAI-compatible chat completions API.
 
         Args:
             system_prompt: System role instruction for GPT.
@@ -93,18 +149,35 @@ class LLMBrain:
 
                 logger.info(
                     "llm_call_success",
+                    provider=self._provider,
                     model=self._model,
                     tokens=tokens_used,
                     total_calls=self._total_calls,
                 )
 
-                return data["choices"][0]["message"]["content"]
+                choices = data.get("choices") or []
+                if not choices:
+                    return "[LLM Error][EmptyChoices] Provider response had no choices."
+                first_choice = choices[0] if isinstance(choices[0], dict) else {}
+                message_obj = first_choice.get("message", {})
+                content = message_obj.get("content") if isinstance(message_obj, dict) else None
+                content_str = str(content or "").strip()
+                if not content_str:
+                    return "[LLM Error][EmptyContent] Provider returned an empty completion."
+                return content_str
         except httpx.HTTPStatusError as e:
-            logger.error("llm_api_http_error", status=e.response.status_code, detail=str(e)[:200])
-            return f"[LLM Error: HTTP {e.response.status_code}]"
+            detail = self._extract_http_error_detail(e.response)
+            logger.error(
+                "llm_api_http_error",
+                status=e.response.status_code,
+                detail=detail,
+            )
+            return f"[LLM Error][HTTP {e.response.status_code}] {detail}"
         except Exception as e:
-            logger.error("llm_api_error", error=str(e)[:200])
-            return f"[LLM Error: {str(e)[:100]}]"
+            err_type = type(e).__name__
+            detail = self._normalize_error_message(str(e), fallback=err_type)
+            logger.error("llm_api_error", error_type=err_type, error=detail)
+            return f"[LLM Error][{err_type}] {detail}"
 
     def _store_insight(self, insight: Dict) -> None:
         """Store an insight in the rolling history, trimming if needed."""
@@ -156,13 +229,11 @@ What are the key things to watch? Any dangers? Best opportunities right now?"""
 
         response = await self._call_gpt(system_prompt, user_prompt)
         if response:
-            insight = {
-                "type": "market_analysis",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "content": response,
-                "model": self._model,
-                "tokens_used": self._total_tokens_used,
-            }
+            insight = self._build_insight(
+                "market_analysis",
+                response,
+                tokens_used=self._total_tokens_used,
+            )
             self._store_insight(insight)
             logger.info("llm_market_analysis_complete", content_length=len(response))
             return insight
@@ -209,13 +280,12 @@ Win/Loss: {'WIN' if profit > 0 else 'LOSS'}"""
 
         response = await self._call_gpt(system_prompt, user_prompt)
         if response:
-            insight = {
-                "type": "trade_review",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "content": response,
-                "trade_symbol": trade_data.get('symbol'),
-                "trade_pnl": profit,
-            }
+            insight = self._build_insight(
+                "trade_review",
+                response,
+                trade_symbol=trade_data.get("symbol"),
+                trade_pnl=profit,
+            )
             self._store_insight(insight)
             logger.info(
                 "llm_trade_review_complete",
@@ -263,11 +333,7 @@ For each strategy, suggest:
 
         response = await self._call_gpt(system_prompt, user_prompt, max_tokens=600)
         if response:
-            insight = {
-                "type": "strategy_review",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "content": response,
-            }
+            insight = self._build_insight("strategy_review", response)
             self._store_insight(insight)
             logger.info("llm_strategy_review_complete", content_length=len(response))
             return insight
@@ -308,19 +374,58 @@ Any specific price levels to watch?"""
 
         response = await self._call_gpt(system_prompt, user_prompt)
         if response:
-            insight = {
-                "type": "regime_analysis",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "content": response,
-                "old_regime": old_regime,
-                "new_regime": new_regime,
-            }
+            insight = self._build_insight(
+                "regime_analysis",
+                response,
+                old_regime=old_regime,
+                new_regime=new_regime,
+            )
             self._store_insight(insight)
             logger.info(
                 "llm_regime_analysis_complete",
                 old_regime=old_regime,
                 new_regime=new_regime,
             )
+            return insight
+        return None
+
+    async def diagnose_losses(self, performance_snapshot: Dict) -> Optional[Dict]:
+        """
+        PURPOSE: Diagnose persistent losses and recommend concrete fixes.
+
+        Called when the brain detects a losing cluster. Internally rate-limited
+        to avoid repetitive cost while losses persist.
+        """
+        now = time.time()
+        if now - self._last_loss_diagnosis_time < self._loss_diagnosis_interval:
+            return None
+        self._last_loss_diagnosis_time = now
+
+        system_prompt = """You are a quantitative trading diagnostician.
+Given strategy/symbol performance stats from an automated system, identify why it is losing.
+Respond with:
+1) Top 3 root causes
+2) Immediate risk controls (position sizing, pausing, filters)
+3) Concrete rule changes by strategy and symbol
+4) A short reinforcement-learning adjustment plan
+Keep it under 260 words and be specific."""
+
+        user_prompt = f"""Diagnose this automated trading system performance snapshot:
+
+{json.dumps(performance_snapshot, indent=2, default=str)}
+
+Focus on:
+- why losses are happening
+- which strategy/symbol combinations are weakest
+- what to pause or reduce now
+- what to increase if edge exists
+- how to adjust reward and exploration behavior."""
+
+        response = await self._call_gpt(system_prompt, user_prompt, max_tokens=700)
+        if response:
+            insight = self._build_insight("loss_diagnosis", response)
+            self._store_insight(insight)
+            logger.info("llm_loss_diagnosis_complete", content_length=len(response))
             return insight
         return None
 
@@ -348,10 +453,22 @@ Any specific price levels to watch?"""
 
         CALLED BY: api/routes_brain.py /llm-insights endpoint
         """
+        last_error: Optional[str] = None
+        for insight in reversed(self._insights_history):
+            if insight.get("is_error"):
+                last_error = insight.get("error_message") or insight.get("content")
+                break
         return {
+            "provider": self._provider,
             "total_calls": self._total_calls,
             "total_tokens_used": self._total_tokens_used,
-            "estimated_cost_usd": round(self._total_tokens_used * 0.00000015, 4),  # gpt-4o-mini pricing
+            # Cost estimate is only available for the current OpenAI default path.
+            "estimated_cost_usd": (
+                round(self._total_tokens_used * 0.00000015, 4)
+                if self._provider == "openai"
+                else 0.0
+            ),
             "model": self._model,
             "insights_count": len(self._insights_history),
+            "last_error": last_error,
         }

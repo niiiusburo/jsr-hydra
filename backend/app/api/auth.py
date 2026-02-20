@@ -8,11 +8,12 @@ API key authentication, and FastAPI dependency injection for route protection.
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Header, status
+from fastapi import APIRouter, Depends, HTTPException, Header, Request, status
 from jose import JWTError, jwt
 from pydantic import BaseModel
 
 from app.config.settings import settings
+from app.core.rate_limit import limiter, AUTH_LIMIT
 from app.schemas import LoginRequest, TokenResponse
 from app.utils.logger import get_logger
 
@@ -222,7 +223,8 @@ async def api_key_auth(x_api_key: Optional[str] = Header(None)) -> str:
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(credentials: LoginRequest) -> TokenResponse:
+@limiter.limit(AUTH_LIMIT)
+async def login(request: Request, credentials: LoginRequest) -> TokenResponse:
     """
     PURPOSE: Authenticate user with username/password and return JWT access token.
 
