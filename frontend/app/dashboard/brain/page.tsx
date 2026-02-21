@@ -1,17 +1,19 @@
 'use client'
 
 import React, { useEffect, useState, useCallback } from 'react'
+import { useRouter } from 'next/navigation'
 import { Brain, RefreshCw } from 'lucide-react'
 import { ThoughtStream } from '@/components/brain/ThoughtStream'
 import { MarketAnalysis } from '@/components/brain/MarketAnalysis'
 import { StrategyScores } from '@/components/brain/StrategyScores'
 import { NextMoves } from '@/components/brain/NextMoves'
 import { LLMInsights } from '@/components/brain/LLMInsights'
+import { useAppStore } from '@/store/useAppStore'
 
 interface BrainState {
   thoughts: Array<{
     timestamp: string
-    type: 'ANALYSIS' | 'DECISION' | 'LEARNING' | 'PLAN'
+    type: 'ANALYSIS' | 'DECISION' | 'LEARNING' | 'PLAN' | 'AI_INSIGHT'
     content: string
     confidence: number
     metadata: Record<string, any>
@@ -39,14 +41,70 @@ interface BrainState {
   last_updated: string
 }
 
+type LLMProvider = 'openai' | 'zai'
+
+interface LLMProviderConfig {
+  provider: LLMProvider
+  configured: boolean
+  default_model: string
+  base_url: string
+}
+
+interface LLMRuntimeConfig {
+  enabled: boolean
+  provider: LLMProvider | 'none'
+  model: string
+  last_error?: string | null
+  providers: LLMProviderConfig[]
+  models: Record<string, string[]>
+}
+
 export default function BrainPage() {
+  const router = useRouter()
   const [brainState, setBrainState] = useState<BrainState | null>(null)
   const [llmInsights, setLlmInsights] = useState<any[]>([])
   const [llmStats, setLlmStats] = useState<any>(null)
+  const [llmConfig, setLlmConfig] = useState<LLMRuntimeConfig | null>(null)
+  const [selectedProvider, setSelectedProvider] = useState<LLMProvider>('openai')
+  const [selectedModel, setSelectedModel] = useState('')
+  const [llmConfigDirty, setLlmConfigDirty] = useState(false)
+  const [savingModelConfig, setSavingModelConfig] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [lastFetch, setLastFetch] = useState<Date | null>(null)
   const [refreshing, setRefreshing] = useState(false)
+  const [isAuthRedirecting, setIsAuthRedirecting] = useState(false)
+
+  const buildAuthHeaders = useCallback((token: string | null, withJson = false) => {
+    const headers: Record<string, string> = token
+      ? { Authorization: `Bearer ${token}`, Accept: 'application/json' }
+      : { Accept: 'application/json' }
+    if (withJson) {
+      headers['Content-Type'] = 'application/json'
+    }
+    return headers
+  }, [])
+
+  const handleUnauthorized = useCallback(
+    (message = 'Session expired. Please sign in again.') => {
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem('auth_token')
+        localStorage.removeItem('app-store')
+      }
+      try {
+        useAppStore.getState().clearToken()
+      } catch {
+        // Best-effort logout cleanup
+      }
+      setError(message)
+
+      if (!isAuthRedirecting) {
+        setIsAuthRedirecting(true)
+        router.replace('/login')
+      }
+    },
+    [isAuthRedirecting, router],
+  )
 
   const fetchBrainState = useCallback(async (isManual = false) => {
     try {
@@ -54,12 +112,18 @@ export default function BrainPage() {
       setError(null)
 
       const token = typeof window !== 'undefined' ? localStorage.getItem('auth_token') : null
-      const headers: Record<string, string> = token
-        ? { Authorization: `Bearer ${token}`, Accept: 'application/json' }
-        : { Accept: 'application/json' }
+      if (!token) {
+        handleUnauthorized('Authentication token missing. Please sign in again.')
+        return
+      }
+      const headers = buildAuthHeaders(token)
 
       const res = await fetch('/api/brain/state', { headers })
 
+      if (res.status === 401) {
+        handleUnauthorized()
+        return
+      }
       if (!res.ok) {
         throw new Error(`Brain API returned ${res.status}`)
       }
@@ -68,13 +132,40 @@ export default function BrainPage() {
       setBrainState(data)
       setLastFetch(new Date())
 
-      // Fetch LLM insights in parallel (non-blocking)
+      // Fetch optional LLM panels (non-blocking for base brain state)
       try {
-        const llmRes = await fetch('/api/brain/llm-insights', { headers })
+        const [llmRes, llmConfigRes] = await Promise.all([
+          fetch('/api/brain/llm-insights', { headers }),
+          fetch('/api/brain/llm-config', { headers }),
+        ])
+
+        if (llmRes.status === 401 || llmConfigRes.status === 401) {
+          handleUnauthorized()
+          return
+        }
+
         if (llmRes.ok) {
           const llmData = await llmRes.json()
           setLlmInsights(llmData.insights || [])
           setLlmStats(llmData.stats || null)
+        }
+
+        if (llmConfigRes.ok) {
+          const configData: LLMRuntimeConfig = await llmConfigRes.json()
+          setLlmConfig(configData)
+
+          if (!llmConfigDirty) {
+            const activeProvider: LLMProvider =
+              configData.provider === 'zai' ? 'zai' : 'openai'
+            const modelsForProvider = configData.models?.[activeProvider] || []
+
+            setSelectedProvider(activeProvider)
+            setSelectedModel(
+              (activeProvider === configData.provider && configData.model)
+                ? configData.model
+                : (modelsForProvider[0] || ''),
+            )
+          }
         }
       } catch {
         // LLM insights are optional -- don't block on failure
@@ -86,7 +177,7 @@ export default function BrainPage() {
       setLoading(false)
       setRefreshing(false)
     }
-  }, [])
+  }, [buildAuthHeaders, handleUnauthorized, llmConfigDirty])
 
   useEffect(() => {
     fetchBrainState()
@@ -98,6 +189,69 @@ export default function BrainPage() {
   const lastUpdated = brainState?.last_updated
     ? new Date(brainState.last_updated).toLocaleTimeString()
     : null
+  const providerOptions: LLMProviderConfig[] = llmConfig?.providers || [
+    { provider: 'openai', configured: false, default_model: 'gpt-4o-mini', base_url: '' },
+    { provider: 'zai', configured: false, default_model: 'glm-4.6', base_url: '' },
+  ]
+  const selectedProviderConfig = llmConfig?.providers.find((p) => p.provider === selectedProvider) || null
+  const modelsForSelectedProvider = llmConfig?.models?.[selectedProvider] || []
+
+  const onProviderChange = (provider: LLMProvider) => {
+    setSelectedProvider(provider)
+    const providerModels = llmConfig?.models?.[provider] || []
+    setSelectedModel(providerModels[0] || '')
+    setLlmConfigDirty(true)
+  }
+
+  const onModelChange = (model: string) => {
+    setSelectedModel(model)
+    setLlmConfigDirty(true)
+  }
+
+  const saveLlmConfig = async () => {
+    if (!selectedModel) {
+      setError('Please select a model before applying.')
+      return
+    }
+
+    try {
+      setSavingModelConfig(true)
+      setError(null)
+      const token = typeof window !== 'undefined' ? localStorage.getItem('auth_token') : null
+      if (!token) {
+        handleUnauthorized('Authentication token missing. Please sign in again.')
+        return
+      }
+
+      const response = await fetch('/api/brain/llm-config', {
+        method: 'PATCH',
+        headers: buildAuthHeaders(token, true),
+        body: JSON.stringify({
+          provider: selectedProvider,
+          model: selectedModel,
+        }),
+      })
+
+      if (response.status === 401) {
+        handleUnauthorized()
+        return
+      }
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        throw new Error(data.detail || `Failed to apply model config (${response.status})`)
+      }
+
+      const updatedConfig: LLMRuntimeConfig = await response.json()
+      setLlmConfig(updatedConfig)
+      setLlmConfigDirty(false)
+      setSelectedProvider(updatedConfig.provider === 'zai' ? 'zai' : 'openai')
+      setSelectedModel(updatedConfig.model)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to update LLM config')
+    } finally {
+      setSavingModelConfig(false)
+    }
+  }
 
   return (
     <div className="min-h-screen bg-brand-dark p-4 md:p-6">
@@ -185,6 +339,65 @@ export default function BrainPage() {
           <div className="bg-brand-panel border border-indigo-500/20 rounded-lg overflow-hidden"
             style={{ boxShadow: '0 0 20px rgba(99, 102, 241, 0.06)' }}
           >
+            <div className="px-6 pt-5 pb-4 border-b border-indigo-500/10">
+              <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+                <div>
+                  <h4 className="text-sm font-semibold text-indigo-200">Brain LLM Model</h4>
+                  <p className="text-xs text-gray-400 mt-1">
+                    Select provider + model for AI analysis used by the engine.
+                  </p>
+                </div>
+
+                <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
+                  <select
+                    value={selectedProvider}
+                    onChange={(e) => onProviderChange(e.target.value as LLMProvider)}
+                    className="px-3 py-2 rounded-md bg-gray-900 border border-gray-700 text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                    aria-label="Select LLM provider"
+                  >
+                    {providerOptions.map((provider) => (
+                      <option key={provider.provider} value={provider.provider}>
+                        {provider.provider.toUpperCase()} {provider.configured ? '' : '(no key)'}
+                      </option>
+                    ))}
+                  </select>
+
+                  <select
+                    value={selectedModel}
+                    onChange={(e) => onModelChange(e.target.value)}
+                    className="px-3 py-2 rounded-md bg-gray-900 border border-gray-700 text-sm text-gray-100 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                    aria-label="Select LLM model"
+                    disabled={!selectedProviderConfig?.configured || modelsForSelectedProvider.length === 0}
+                  >
+                    {modelsForSelectedProvider.map((model) => (
+                      <option key={model} value={model}>{model}</option>
+                    ))}
+                  </select>
+
+                  <button
+                    onClick={saveLlmConfig}
+                    disabled={
+                      savingModelConfig
+                      || !llmConfigDirty
+                      || !selectedModel
+                      || !selectedProviderConfig?.configured
+                    }
+                    className="px-3 py-2 rounded-md text-sm font-medium bg-indigo-600/80 text-white hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    {savingModelConfig ? 'Applying...' : 'Apply Model'}
+                  </button>
+                </div>
+              </div>
+
+              {llmConfig && !selectedProviderConfig?.configured && (
+                <p className="mt-2 text-xs text-amber-300">
+                  {selectedProvider.toUpperCase()} API key is missing in environment.
+                </p>
+              )}
+              {llmConfig?.last_error && (
+                <p className="mt-2 text-xs text-red-300">{llmConfig.last_error}</p>
+              )}
+            </div>
             <div className="px-6 py-4">
               <LLMInsights
                 insights={llmInsights}

@@ -4,10 +4,13 @@ import React from 'react'
 import { BarChart3, ArrowRightLeft, Settings, TrendingUp, Cpu, Zap } from 'lucide-react'
 
 interface LLMInsight {
-  type: 'market_analysis' | 'trade_review' | 'strategy_review' | 'regime_analysis'
+  type: 'market_analysis' | 'trade_review' | 'strategy_review' | 'regime_analysis' | 'loss_diagnosis'
   timestamp: string
   content: string
   model?: string
+  provider?: string
+  is_error?: boolean
+  error_message?: string
   tokens_used?: number
   trade_symbol?: string
   trade_pnl?: number
@@ -16,11 +19,13 @@ interface LLMInsight {
 }
 
 interface LLMStats {
+  provider?: string
   total_calls: number
   total_tokens_used: number
   estimated_cost_usd: number
   model: string
   insights_count: number
+  last_error?: string
   message?: string
 }
 
@@ -58,6 +63,12 @@ const typeConfig: Record<
     color: 'text-fuchsia-300',
     borderColor: 'border-fuchsia-500/30',
   },
+  loss_diagnosis: {
+    icon: <Zap size={14} />,
+    label: 'Loss Diagnosis',
+    color: 'text-amber-300',
+    borderColor: 'border-amber-500/30',
+  },
 }
 
 function getRelativeTime(timestamp: string): string {
@@ -76,6 +87,17 @@ function getRelativeTime(timestamp: string): string {
   if (diffHours < 24) return `${diffHours}h ago`
 
   return `${Math.floor(diffHours / 24)}d ago`
+}
+
+function normalizeInsightError(insight: LLMInsight): string {
+  const raw = (insight.error_message || insight.content || '').trim()
+  if (raw.length === 0) return 'Unknown LLM runtime error.'
+  return raw
+}
+
+function isInsightError(insight: LLMInsight): boolean {
+  if (insight.is_error) return true
+  return (insight.content || '').trim().startsWith('[LLM Error')
 }
 
 export function LLMInsights({ insights, stats, loading = false }: LLMInsightsProps) {
@@ -108,7 +130,7 @@ export function LLMInsights({ insights, stats, loading = false }: LLMInsightsPro
           </div>
           <h3 className="text-lg font-semibold text-gray-100">AI Insights</h3>
           <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-500/15 text-indigo-300 border border-indigo-500/20">
-            GPT
+            {(stats?.provider || 'llm').toUpperCase()}
           </span>
         </div>
         {stats && stats.total_calls > 0 && (
@@ -131,7 +153,15 @@ export function LLMInsights({ insights, stats, loading = false }: LLMInsightsPro
       ) : (
         <div className="space-y-3 max-h-[400px] overflow-y-auto pr-2 scrollbar-thin">
           {insights.map((insight, index) => {
-            const config = typeConfig[insight.type] || typeConfig.market_analysis
+            const isError = isInsightError(insight)
+            const baseConfig = typeConfig[insight.type] || typeConfig.market_analysis
+            const config = isError
+              ? {
+                  ...baseConfig,
+                  color: 'text-red-300',
+                  borderColor: 'border-red-500/40',
+                }
+              : baseConfig
             const isNew = index === 0
 
             return (
@@ -155,6 +185,11 @@ export function LLMInsights({ insights, stats, loading = false }: LLMInsightsPro
                     >
                       {config.label}
                     </span>
+                    {isError && (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded border border-red-500/40 text-red-300 font-semibold tracking-wide">
+                        LLM ERROR
+                      </span>
+                    )}
                     {insight.trade_symbol && (
                       <span className="text-xs px-1.5 py-0.5 rounded bg-gray-700/60 text-gray-300 font-mono">
                         {insight.trade_symbol}
@@ -182,7 +217,7 @@ export function LLMInsights({ insights, stats, loading = false }: LLMInsightsPro
 
                 {/* Content */}
                 <p className="text-sm text-gray-200 leading-relaxed whitespace-pre-line">
-                  {insight.content}
+                  {isError ? normalizeInsightError(insight) : insight.content}
                 </p>
               </div>
             )
@@ -193,8 +228,18 @@ export function LLMInsights({ insights, stats, loading = false }: LLMInsightsPro
       {/* Stats Footer */}
       {stats && stats.total_calls > 0 && (
         <div className="mt-4 pt-3 border-t border-gray-700/50">
+          {stats.last_error && (
+            <div className="mb-2 text-xs text-red-300">
+              Last LLM error: <span className="text-red-200">{stats.last_error}</span>
+            </div>
+          )}
           <div className="flex items-center justify-between text-xs text-gray-500">
             <div className="flex items-center gap-4">
+              {stats.provider && stats.provider !== 'none' && (
+                <span>
+                  Provider: <span className="text-gray-400 font-mono">{stats.provider}</span>
+                </span>
+              )}
               <span>
                 Model: <span className="text-gray-400 font-mono">{stats.model}</span>
               </span>

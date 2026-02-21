@@ -62,10 +62,12 @@ const STRATEGY_COLORS: Record<string, string> = {
   STRATEGY_B: '#3b82f6',
   STRATEGY_C: '#f59e0b',
   STRATEGY_D: '#ef4444',
+  STRATEGY_E: '#14b8a6',
   A: '#00d97e',
   B: '#3b82f6',
   C: '#f59e0b',
   D: '#ef4444',
+  E: '#14b8a6',
 }
 
 const DEFAULT_COLOR = '#6b7280'
@@ -117,9 +119,41 @@ export function AllocationManager({ strategies, onSave }: AllocationManagerProps
   const isValid = total <= 100
 
   const handleAllocationChange = (code: string, value: number) => {
-    setAllocations({
-      ...allocations,
-      [code]: Math.max(0, Math.min(100, value)),
+    const clampedValue = Math.max(0, Math.min(100, value))
+
+    setAllocations(prev => {
+      const next = {
+        ...prev,
+        [code]: clampedValue,
+      }
+
+      const total = Object.values(next).reduce((sum, val) => sum + val, 0)
+      if (total <= 100) {
+        return next
+      }
+
+      // Keep edited strategy at requested value; reduce others to maintain 100%.
+      let overflow = total - 100
+      const otherCodes = Object.keys(next)
+        .filter(k => k !== code)
+        .sort((a, b) => (next[b] ?? 0) - (next[a] ?? 0))
+
+      for (const otherCode of otherCodes) {
+        if (overflow <= 0) break
+        const current = next[otherCode] ?? 0
+        if (current <= 0) continue
+
+        const reduction = Math.min(current, overflow)
+        next[otherCode] = Number((current - reduction).toFixed(1))
+        overflow = Number((overflow - reduction).toFixed(6))
+      }
+
+      if (overflow > 0) {
+        // Safety fallback in edge cases.
+        next[code] = Number(Math.max(0, (next[code] ?? 0) - overflow).toFixed(1))
+      }
+
+      return next
     })
   }
 
@@ -158,15 +192,39 @@ export function AllocationManager({ strategies, onSave }: AllocationManagerProps
     setIsSaving(true)
     setSaveError(null)
     try {
-      for (const [code, value] of Object.entries(allocations)) {
-        const response = await fetch(`/api/strategies/${code}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ allocation_pct: value }),
-        })
-        if (!response.ok) throw new Error(`Failed to update ${code}`)
+      const token = typeof window !== 'undefined' ? localStorage.getItem('auth_token') : null
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
       }
-      onSave?.(allocations)
+      if (token) headers['Authorization'] = `Bearer ${token}`
+
+      const roundedAllocations = Object.fromEntries(
+        Object.entries(allocations).map(([code, value]) => [
+          code,
+          Number((value ?? 0).toFixed(1)),
+        ])
+      )
+
+      const response = await fetch('/api/strategies/allocations', {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ allocations: roundedAllocations }),
+      })
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null)
+        const detail = payload?.detail
+        const detailMessage =
+          typeof detail === 'string'
+            ? detail
+            : typeof detail?.message === 'string'
+              ? detail.message
+              : null
+        throw new Error(detailMessage || 'Failed to update allocations')
+      }
+
+      onSave?.(roundedAllocations)
     } catch (error) {
       console.error('Failed to save allocations:', error)
       setSaveError(error instanceof Error ? error.message : 'Failed to save allocations')

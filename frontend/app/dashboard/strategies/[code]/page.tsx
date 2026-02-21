@@ -123,6 +123,21 @@ const STRATEGY_DESCRIPTIONS: Record<string, { title: string; description: string
       'Risk per trade': '0.5% of equity',
     },
   },
+  E: {
+    title: 'Range Scalper (Sideways)',
+    description:
+      'Range Scalper is designed for sideways markets. It only fires when ADX is low, then fades extremes at the Bollinger Bands with RSI confirmation. Entries are quick, stops are tight (0.8 ATR), and targets aim for mean reversion toward the middle band.',
+    parameters: {
+      'Timeframe': 'M5',
+      'ADX Filter': '<= 20 (sideways only)',
+      'BB Period': '20',
+      'RSI Period': '9',
+      'RSI Buy/Sell': '<= 35 / >= 65',
+      'SL Distance': '0.8x ATR',
+      'TP Distance': 'Middle BB (min 0.6x ATR)',
+      'Risk per trade': '0.5% of equity',
+    },
+  },
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -155,7 +170,7 @@ export default function StrategyDetailPage() {
   const strategyDesc = STRATEGY_DESCRIPTIONS[code]
 
   useEffect(() => {
-    if (!code || !['A', 'B', 'C', 'D'].includes(code)) {
+    if (!code || !['A', 'B', 'C', 'D', 'E'].includes(code)) {
       setError('Invalid strategy code')
       setIsLoading(false)
       return

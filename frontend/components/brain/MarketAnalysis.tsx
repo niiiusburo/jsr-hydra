@@ -11,6 +11,16 @@ interface MarketAnalysisData {
   regime_confidence: number
   key_levels: { [key: string]: number }
   summary: string
+  symbol?: string
+  symbols?: Record<
+    string,
+    {
+      regime: string
+      regime_confidence: number
+      bid?: number
+      spread?: number
+    }
+  >
 }
 
 interface MarketAnalysisProps {
@@ -60,6 +70,7 @@ export function MarketAnalysis({ data, loading = false }: MarketAnalysisProps) {
   }
 
   const regime = regimeConfig[data.regime] || regimeConfig.RANGING
+  const symbolEntries = Object.entries(data.symbols || {})
 
   return (
     <div className="bg-brand-panel border border-gray-700 rounded-lg overflow-hidden">
@@ -129,6 +140,38 @@ export function MarketAnalysis({ data, loading = false }: MarketAnalysisProps) {
         <div className="p-3 rounded-lg bg-purple-500/5 border border-purple-500/10">
           <p className="text-sm text-gray-300 leading-relaxed">{data.summary}</p>
         </div>
+
+        {/* Per-symbol brain view */}
+        {symbolEntries.length > 0 && (
+          <div className="pt-2 border-t border-gray-700/50">
+            <div className="text-xs text-gray-500 uppercase tracking-wide font-semibold mb-2">
+              Pair Brain
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+              {symbolEntries.map(([symbol, snapshot]) => {
+                const symRegime = regimeConfig[snapshot.regime] || regimeConfig.RANGING
+                return (
+                  <div
+                    key={symbol}
+                    className={`rounded-md border px-3 py-2 ${symRegime.bg} ${symRegime.border}`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-sm font-semibold text-gray-100">{symbol}</span>
+                      <span className={`text-[11px] font-medium ${symRegime.color}`}>
+                        {symRegime.label}
+                      </span>
+                    </div>
+                    <div className="mt-1 text-[11px] text-gray-300">
+                      Conf {((snapshot.regime_confidence ?? 0) * 100).toFixed(0)}%
+                      {snapshot.bid !== undefined && snapshot.bid !== null ? ` • ${snapshot.bid.toFixed(4)}` : ''}
+                      {snapshot.spread !== undefined && snapshot.spread !== null ? ` • spr ${snapshot.spread}` : ''}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )

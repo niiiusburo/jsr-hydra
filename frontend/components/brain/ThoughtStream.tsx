@@ -2,12 +2,24 @@
 
 import React, { useEffect, useRef } from 'react'
 
+interface ThoughtMetadata {
+  symbol?: string
+  price?: number
+  price_change?: number
+  price_change_pct?: number
+  bid?: number
+  ask?: number
+  trigger?: string
+  llm_error?: boolean
+  [key: string]: any
+}
+
 interface Thought {
   timestamp: string
   type: 'ANALYSIS' | 'DECISION' | 'LEARNING' | 'PLAN' | 'AI_INSIGHT'
   content: string
   confidence: number
-  metadata: Record<string, any>
+  metadata: ThoughtMetadata
 }
 
 interface ThoughtStreamProps {
@@ -39,6 +51,62 @@ function getRelativeTime(timestamp: string): string {
   if (diffHours < 24) return `${diffHours}h ago`
 
   return `${Math.floor(diffHours / 24)}d ago`
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string') {
+    const parsed = Number(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return null
+}
+
+function formatPrice(value: number): string {
+  const abs = Math.abs(value)
+  if (abs >= 1000) return value.toFixed(2)
+  if (abs >= 100) return value.toFixed(3)
+  if (abs >= 1) return value.toFixed(5)
+  return value.toFixed(6)
+}
+
+function formatSignedValue(value: number, decimals: number): string {
+  const sign = value > 0 ? '+' : value < 0 ? '' : ''
+  return `${sign}${value.toFixed(decimals)}`
+}
+
+function formatSignedPercent(value: number): string {
+  const sign = value > 0 ? '+' : value < 0 ? '' : ''
+  return `${sign}${value.toFixed(3)}%`
+}
+
+function priceDeltaDecimals(price: number): number {
+  const abs = Math.abs(price)
+  if (abs >= 1000) return 2
+  if (abs >= 100) return 3
+  if (abs >= 1) return 5
+  return 6
+}
+
+function getPriceContext(metadata: ThoughtMetadata) {
+  const symbol = typeof metadata?.symbol === 'string' ? metadata.symbol : null
+  const explicitPrice = toFiniteNumber(metadata?.price)
+  const bid = toFiniteNumber(metadata?.bid)
+  const ask = toFiniteNumber(metadata?.ask)
+
+  const price =
+    explicitPrice ??
+    (bid !== null && ask !== null ? (bid + ask) / 2 : bid ?? ask)
+
+  const change = toFiniteNumber(metadata?.price_change)
+  const changePct = toFiniteNumber(metadata?.price_change_pct)
+
+  return {
+    symbol,
+    price,
+    change,
+    changePct,
+  }
 }
 
 export function ThoughtStream({ thoughts, loading = false }: ThoughtStreamProps) {
@@ -82,6 +150,24 @@ export function ThoughtStream({ thoughts, loading = false }: ThoughtStreamProps)
       {thoughts.map((thought, index) => {
         const config = typeConfig[thought.type] || typeConfig.ANALYSIS
         const isNew = index === 0
+        const priceCtx = getPriceContext(thought.metadata || {})
+        const hasPrice = priceCtx.price !== null
+        const hasChange = priceCtx.change !== null
+        const trigger =
+          typeof thought.metadata?.trigger === 'string' ? thought.metadata.trigger : null
+        const llmError = thought.metadata?.llm_error === true
+        const moveColor =
+          priceCtx.change !== null && priceCtx.change > 0
+            ? 'text-green-300'
+            : priceCtx.change !== null && priceCtx.change < 0
+            ? 'text-red-300'
+            : 'text-gray-400'
+        const moveMarker =
+          priceCtx.change !== null && priceCtx.change > 0
+            ? '▲'
+            : priceCtx.change !== null && priceCtx.change < 0
+            ? '▼'
+            : '•'
 
         return (
           <div
@@ -105,6 +191,44 @@ export function ThoughtStream({ thoughts, loading = false }: ThoughtStreamProps)
             </div>
 
             {/* Content */}
+            {hasPrice && (
+              <div className="mb-1.5 flex flex-wrap items-center gap-2 text-[11px]">
+                {priceCtx.symbol && (
+                  <span className="px-1.5 py-0.5 rounded bg-gray-900/70 border border-gray-700 text-gray-300 font-mono">
+                    {priceCtx.symbol}
+                  </span>
+                )}
+                <span className="text-gray-300 font-mono">
+                  Price {formatPrice(priceCtx.price as number)}
+                </span>
+                {hasChange && (
+                  <span className={`font-mono ${moveColor}`}>
+                    {moveMarker}{' '}
+                    {formatSignedValue(
+                      priceCtx.change as number,
+                      priceDeltaDecimals(priceCtx.price as number),
+                    )}
+                    {priceCtx.changePct !== null
+                      ? ` (${formatSignedPercent(priceCtx.changePct)})`
+                      : ''}
+                  </span>
+                )}
+              </div>
+            )}
+            {(trigger || llmError) && (
+              <div className="mb-1.5 flex flex-wrap items-center gap-2 text-[10px]">
+                {trigger && (
+                  <span className="px-1.5 py-0.5 rounded border border-gray-600 bg-gray-900/40 text-gray-300 uppercase tracking-wide">
+                    {trigger.replace(/_/g, ' ')}
+                  </span>
+                )}
+                {llmError && (
+                  <span className="px-1.5 py-0.5 rounded border border-red-500/50 bg-red-900/20 text-red-300 uppercase tracking-wide">
+                    LLM Error
+                  </span>
+                )}
+              </div>
+            )}
             <p className="text-sm text-gray-200 leading-relaxed">{thought.content}</p>
 
             {/* Confidence bar */}
