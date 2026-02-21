@@ -1515,7 +1515,11 @@ class Brain:
         )
 
     async def _llm_analyze_market(self, market_data: Dict) -> None:
-        """Fire LLM market analysis with bull/bear debate pipeline."""
+        """Fire LLM market analysis with bull/bear debate pipeline.
+
+        Pipeline: market analysis -> (wait) -> debate -> (wait) -> signal extraction.
+        Delays between steps avoid rate limiting on providers with tight quotas (e.g. Z.AI).
+        """
         try:
             # Step 1: Run the standard analysis (sentiment-aware)
             insight = await self._llm.analyze_market(market_data)
@@ -1525,6 +1529,9 @@ class Brain:
                 success_confidence=0.8,
             )
 
+            # Brief pause to avoid rate limiting on low-tier providers
+            await asyncio.sleep(5)
+
             # Step 2: Run bull/bear debate for structured signal
             debate_result = await self._llm.bull_bear_debate(market_data)
             if debate_result:
@@ -1533,6 +1540,8 @@ class Brain:
                     insight_type="bull_bear_debate",
                     success_confidence=debate_result.get("verdict", {}).get("conviction", 0.5),
                 )
+
+                await asyncio.sleep(5)
 
                 # Step 3: Extract actionable signal from debate
                 signal_result = await self._llm.extract_signal(debate_result, market_data)

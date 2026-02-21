@@ -241,7 +241,7 @@ class LLMBrain:
             transient = ["[HTTP 4", "[HTTP 5", "Timeout", "ConnectError"]
             if result and any(tag in result for tag in transient):
                 if attempt < max_retries:
-                    wait = (2 ** attempt) + random.uniform(0, 1)
+                    wait = (3 ** attempt) * 2 + random.uniform(0, 2)
                     logger.info("llm_retry", attempt=attempt + 1, wait=round(wait, 1))
                     await asyncio.sleep(wait)
                     continue
