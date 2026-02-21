@@ -8,7 +8,7 @@ engine = create_async_engine(
     echo=settings.DEBUG,
     pool_pre_ping=True,
     pool_size=20,
-    max_overflow=0,
+    max_overflow=10,
 )
 
 # Create async session factory
@@ -32,5 +32,8 @@ async def get_db():
     async with AsyncSessionLocal() as session:
         try:
             yield session
+        except Exception:
+            await session.rollback()
+            raise
         finally:
             await session.close()

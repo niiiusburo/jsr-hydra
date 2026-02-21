@@ -29,7 +29,7 @@ class StrategySignal(BaseModel):
         sl_price: Stop-loss price level
         tp_price: Take-profit price level
         reason: Human-readable explanation
-        strategy_code: Strategy identifier (A, B, C, D)
+        strategy_code: Strategy identifier (A, B, C, D, E)
     """
 
     direction: str

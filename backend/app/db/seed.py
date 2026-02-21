@@ -30,8 +30,8 @@ async def seed_database(db: AsyncSession) -> None:
 
     Creates:
     - Default MasterAccount from MT5_LOGIN setting
-    - Four default strategies (A, B, C, D) with equal allocations
-    - Initial allocation records (25% each)
+    - Five default strategies (A, B, C, D, E)
+    - Initial allocation records for active defaults
     - System health records for core services
 
     Idempotent: Safe to run multiple times - checks for existing data.
@@ -102,13 +102,14 @@ async def seed_strategies(db: AsyncSession) -> None:
     """
     PURPOSE: Create default strategies and allocations if they don't exist.
 
-    Creates four strategies:
+    Creates five strategies:
     - A: Trend Following (TF)
     - B: Mean Reversion Grid (MRG)
     - C: Session Breakout (SB)
-    - D: Volatility Harvester (VH)
+    - D: Momentum Scalper (MS)
+    - E: Range Scalper (RS)
 
-    Each gets 25% allocation.
+    Active defaults (A-D) get 25% each. E starts paused at 0%.
     Idempotent: Returns early if strategies already exist.
 
     Args:
@@ -150,10 +151,16 @@ async def seed_strategies(db: AsyncSession) -> None:
             "config": {"sessions": ["ASIA", "LONDON", "NEW_YORK"], "breakout_pips": 50},
         },
         {
-            "name": "Volatility Harvester",
+            "name": "Momentum Scalper",
             "code": "D",
-            "description": "Volatility-based option harvesting strategy",
-            "config": {"vol_regime": "HIGH", "target_delta": 0.3},
+            "description": "Momentum burst scalping using RSI and Bollinger Bands",
+            "config": {"bb_period": 14, "bb_std": 1.5, "rsi_oversold": 38, "rsi_overbought": 62},
+        },
+        {
+            "name": "Range Scalper (Sideways)",
+            "code": "E",
+            "description": "Sideways market scalping with ADX filter and BB mean-reversion entries",
+            "config": {"adx_max": 20, "bb_period": 20, "rsi_buy": 35, "rsi_sell": 65},
         },
     ]
 
@@ -164,8 +171,8 @@ async def seed_strategies(db: AsyncSession) -> None:
             name=data["name"],
             code=data["code"],
             description=data["description"],
-            status="PAUSED",
-            allocation_pct=25.0,
+            status="ACTIVE" if data["code"] in {"A", "B", "C", "D"} else "PAUSED",
+            allocation_pct=25.0 if data["code"] in {"A", "B", "C", "D"} else 0.0,
             win_rate=0.0,
             profit_factor=0.0,
             total_trades=0,
@@ -180,14 +187,20 @@ async def seed_strategies(db: AsyncSession) -> None:
     await db.flush()
     logger.info("Created strategies", count=len(strategies), codes=[s.code for s in strategies])
 
-    # Create allocations for each strategy
-    for strategy in strategies:
+    # Create allocations only for active default strategies
+    active_strategies = [s for s in strategies if (s.status or "").upper() == "ACTIVE"]
+    if not active_strategies:
+        logger.warning("No active strategies found during seeding")
+        return
+
+    equal_weight = round(1.0 / len(active_strategies), 4)
+    for strategy in active_strategies:
         allocation = CapitalAllocation(
             id=uuid4(),
             master_id=master.id,
             strategy_id=strategy.id,
             regime_id=None,
-            weight=0.25,
+            weight=equal_weight,
             source="SEED",
             allocated_at=datetime.utcnow(),
             created_at=datetime.utcnow(),
@@ -196,7 +209,7 @@ async def seed_strategies(db: AsyncSession) -> None:
         db.add(allocation)
 
     await db.flush()
-    logger.info("Created allocations", count=len(strategies), weight_per_strategy=0.25)
+    logger.info("Created allocations", count=len(active_strategies), weight_per_strategy=equal_weight)
 
 
 async def seed_system_health(db: AsyncSession) -> None:

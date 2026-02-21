@@ -6,6 +6,9 @@ Handles UTC-based calculations for forex, crypto, and news event windows.
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
+# Crypto symbols that trade 24/7
+CRYPTO_SYMBOLS = {"BTCUSD", "ETHUSD", "LTCUSD", "XRPUSD"}
+
 
 def get_utc_now() -> datetime:
     """
@@ -28,6 +31,10 @@ def is_market_open(symbol: str = "XAUUSD") -> bool:
     Returns:
         bool: True if market is currently within trading hours, False otherwise.
     """
+    # Crypto trades 24/7
+    if symbol.upper() in CRYPTO_SYMBOLS:
+        return True
+
     now = get_utc_now()
     current_weekday = now.weekday()  # Monday=0, Sunday=6
     current_hour_utc = now.hour
@@ -36,28 +43,37 @@ def is_market_open(symbol: str = "XAUUSD") -> bool:
     # Friday 17:00 EST = Friday 22:00 UTC
     # Forex is closed Friday 22:00 UTC to Sunday 22:00 UTC
 
-    if current_weekday == 6:  # Sunday
-        return current_hour_utc >= 22
-    elif current_weekday == 5:  # Friday
-        return current_hour_utc < 22
-    elif current_weekday == 4:  # Thursday (or earlier in week)
-        return True
-    elif current_weekday < 4:
-        return True
-    else:
+    if current_weekday == 6:    # Sunday
+        return current_hour_utc >= 22  # Forex opens Sunday 22:00 UTC
+    elif current_weekday == 5:  # Saturday — always closed
         return False
+    elif current_weekday == 4:  # Friday
+        return current_hour_utc < 22   # Forex closes Friday 22:00 UTC
+    else:                        # Monday through Thursday
+        return True
 
 
 def is_weekend() -> bool:
     """
-    PURPOSE: Determine if the current UTC time falls on a weekend.
+    PURPOSE: Determine if forex market is in weekend closure.
+
+    Forex weekend closure: Friday 22:00 UTC to Sunday 22:00 UTC.
+    This aligns with is_market_open() so the two checks don't contradict.
 
     Returns:
-        bool: True if current day is Saturday or Sunday (UTC), False otherwise.
+        bool: True if currently in weekend closure period, False otherwise.
     """
     now = get_utc_now()
     weekday = now.weekday()  # Monday=0, Sunday=6
-    return weekday >= 5  # Saturday=5, Sunday=6
+    hour = now.hour
+
+    if weekday == 5:  # Saturday — always closed
+        return True
+    if weekday == 4 and hour >= 22:  # Friday after 22:00 UTC — closed
+        return True
+    if weekday == 6 and hour < 22:  # Sunday before 22:00 UTC — still closed
+        return True
+    return False
 
 
 def get_session(dt: Optional[datetime] = None) -> str:

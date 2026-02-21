@@ -8,12 +8,12 @@ interface Trade {
   id: string
   time: string
   symbol: string
-  direction: 'BUY' | 'SELL'
+  direction: string
   lots: number
   entry: number
   exit: number
   pnl: number
-  strategy: string
+  status?: string
 }
 
 interface RecentTradesProps {
@@ -21,20 +21,7 @@ interface RecentTradesProps {
   loading?: boolean
 }
 
-const mockTrades: Trade[] = [
-  { id: '1', time: '14:35', symbol: 'EURUSD', direction: 'BUY', lots: 1.0, entry: 1.0850, exit: 1.0875, pnl: 250, strategy: 'A' },
-  { id: '2', time: '14:20', symbol: 'GBPUSD', direction: 'SELL', lots: 0.5, entry: 1.2650, exit: 1.2620, pnl: 150, strategy: 'B' },
-  { id: '3', time: '14:10', symbol: 'AUDUSD', direction: 'BUY', lots: 2.0, entry: 0.6520, exit: 0.6510, pnl: -200, strategy: 'A' },
-  { id: '4', time: '13:55', symbol: 'USDJPY', direction: 'SELL', lots: 1.5, entry: 148.50, exit: 148.30, pnl: 300, strategy: 'C' },
-  { id: '5', time: '13:40', symbol: 'EURUSD', direction: 'BUY', lots: 0.8, entry: 1.0820, exit: 1.0845, pnl: 200, strategy: 'B' },
-  { id: '6', time: '13:25', symbol: 'GBPUSD', direction: 'BUY', lots: 1.2, entry: 1.2620, exit: 1.2640, pnl: 240, strategy: 'A' },
-  { id: '7', time: '13:10', symbol: 'NZDUSD', direction: 'SELL', lots: 0.5, entry: 0.6100, exit: 0.6095, pnl: -100, strategy: 'D' },
-  { id: '8', time: '12:55', symbol: 'AUDUSD', direction: 'SELL', lots: 1.0, entry: 0.6550, exit: 0.6530, pnl: 200, strategy: 'C' },
-  { id: '9', time: '12:40', symbol: 'USDJPY', direction: 'BUY', lots: 2.0, entry: 148.00, exit: 148.20, pnl: 400, strategy: 'B' },
-  { id: '10', time: '12:25', symbol: 'EURUSD', direction: 'SELL', lots: 1.0, entry: 1.0900, exit: 1.0880, pnl: 200, strategy: 'A' },
-]
-
-export function RecentTrades({ trades = mockTrades, loading = false }: RecentTradesProps) {
+export function RecentTrades({ trades, loading = false }: RecentTradesProps) {
   const [sortBy, setSortBy] = useState<'time' | 'pnl'>('time')
 
   if (loading) {
@@ -49,12 +36,39 @@ export function RecentTrades({ trades = mockTrades, loading = false }: RecentTra
     )
   }
 
+  if (!trades || trades.length === 0) {
+    return (
+      <Card title="Recent Trades">
+        <p className="text-gray-400 text-sm">No trades recorded yet. The engine will log trades as they execute.</p>
+      </Card>
+    )
+  }
+
   const sortedTrades = [...trades].sort((a, b) => {
     if (sortBy === 'pnl') {
       return b.pnl - a.pnl
     }
     return 0
   })
+
+  const formatTime = (timeStr: string) => {
+    if (!timeStr) return '-'
+    try {
+      const d = new Date(timeStr)
+      return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    } catch {
+      return timeStr
+    }
+  }
+
+  const formatPrice = (price: number, symbol: string) => {
+    if (price === null || price === undefined) return '-'
+    // JPY pairs use 3 digits, gold/crypto uses 2, forex uses 5
+    const digits = symbol?.includes('JPY') ? 3
+      : (symbol?.includes('XAU') || symbol?.includes('BTC') || symbol?.includes('ETH')) ? 2
+      : 5
+    return price.toFixed(digits)
+  }
 
   return (
     <Card
@@ -87,13 +101,13 @@ export function RecentTrades({ trades = mockTrades, loading = false }: RecentTra
               <th className="px-3 py-2 text-right text-xs font-semibold text-gray-400">Entry</th>
               <th className="px-3 py-2 text-right text-xs font-semibold text-gray-400">Exit</th>
               <th className="px-3 py-2 text-right text-xs font-semibold text-gray-400">P&L</th>
-              <th className="px-3 py-2 text-center text-xs font-semibold text-gray-400">Strat</th>
+              <th className="px-3 py-2 text-center text-xs font-semibold text-gray-400">Status</th>
             </tr>
           </thead>
           <tbody>
             {sortedTrades.map((trade) => (
               <tr key={trade.id} className="border-b border-gray-800 hover:bg-black/20 transition-colors">
-                <td className="px-3 py-2 text-gray-300">{trade.time}</td>
+                <td className="px-3 py-2 text-gray-300 text-xs">{formatTime(trade.time)}</td>
                 <td className="px-3 py-2 font-semibold text-gray-100">{trade.symbol}</td>
                 <td className="px-3 py-2">
                   <Badge variant={trade.direction === 'BUY' ? 'success' : 'danger'} dot={false}>
@@ -101,12 +115,12 @@ export function RecentTrades({ trades = mockTrades, loading = false }: RecentTra
                   </Badge>
                 </td>
                 <td className="px-3 py-2 text-right text-gray-300">{trade.lots}</td>
-                <td className="px-3 py-2 text-right text-gray-400">{trade.entry.toFixed(4)}</td>
-                <td className="px-3 py-2 text-right text-gray-400">{trade.exit.toFixed(4)}</td>
+                <td className="px-3 py-2 text-right text-gray-400">{formatPrice(trade.entry, trade.symbol)}</td>
+                <td className="px-3 py-2 text-right text-gray-400">{formatPrice(trade.exit, trade.symbol)}</td>
                 <td className={`px-3 py-2 text-right font-semibold ${trade.pnl >= 0 ? 'text-brand-accent-green' : 'text-brand-accent-red'}`}>
-                  {trade.pnl >= 0 ? '+' : ''}{trade.pnl}
+                  {trade.pnl >= 0 ? '+' : ''}{trade.pnl.toFixed(2)}
                 </td>
-                <td className="px-3 py-2 text-center text-gray-400">{trade.strategy}</td>
+                <td className="px-3 py-2 text-center text-xs text-gray-400">{trade.status || '-'}</td>
               </tr>
             ))}
           </tbody>

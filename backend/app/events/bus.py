@@ -250,12 +250,31 @@ class EventBus:
 _bus: Optional[EventBus] = None
 
 
+def set_event_bus(bus: EventBus) -> None:
+    """
+    Store a connected EventBus instance as the global singleton.
+
+    PURPOSE: Allow the engine and API server to inject the already-connected
+    EventBus so that all modules (KillSwitch, TradeService, etc.) that call
+    get_event_bus() receive the same connected instance rather than an
+    unconnected duplicate.
+
+    CALLED BY: engine.start() and main.py on_startup() after connecting.
+
+    Args:
+        bus: A connected EventBus instance to store as the global singleton.
+    """
+    global _bus
+    _bus = bus
+
+
 def get_event_bus() -> EventBus:
     """
     Get or create the global EventBus singleton.
 
     PURPOSE: Provide lazy initialization of the event bus with settings from
-    the application configuration.
+    the application configuration. Returns the connected instance if one has
+    been set via set_event_bus(); otherwise creates a new unconnected instance.
 
     CALLED BY: Any module that needs the event bus.
 
@@ -268,8 +287,7 @@ def get_event_bus() -> EventBus:
     global _bus
     if _bus is None:
         try:
-            from app.config.settings import Settings
-            settings = Settings()
+            from app.config.settings import settings
             _bus = EventBus(settings.REDIS_URL)
         except Exception as e:
             from app.utils.logger import get_logger

@@ -16,7 +16,6 @@ dependencies = [
     "alembic",
     "pydantic-settings",
     "redis[hiredis]",
-    "mt5linux",
     "structlog",
     "numpy",
     "pandas",
@@ -25,6 +24,7 @@ dependencies = [
     "python-jose[cryptography]",
     "passlib[bcrypt]",
     "python-multipart",
+    "slowapi",
 ]
 
 [project.optional-dependencies]

@@ -15,6 +15,7 @@ from decimal import Decimal
 from sqlalchemy import select, func, and_, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config.constants import EventType
 from app.models.trade import Trade
 from app.models.strategy import Strategy
 from app.schemas.trade import TradeCreate, TradeUpdate, TradeResponse, TradeList, TradeStats
@@ -40,7 +41,9 @@ class TradeService:
     async def create_trade(
         db: AsyncSession,
         master_id: UUID,
-        trade_data: TradeCreate
+        trade_data: TradeCreate,
+        status: str = "PENDING",
+        mt5_ticket: Optional[int] = None
     ) -> TradeResponse:
         """
         Create a new trade record in the database.
@@ -54,6 +57,8 @@ class TradeService:
             db: Async database session
             master_id: UUID of the master account opening the trade
             trade_data: TradeCreate schema with trade details
+            status: Initial trade status (default "PENDING", pass "OPEN" to skip two-phase write)
+            mt5_ticket: Optional MT5 ticket number to set on creation
 
         Returns:
             TradeResponse: Created trade with all fields populated
@@ -91,13 +96,16 @@ class TradeService:
                 stop_loss=trade_data.stop_loss,
                 take_profit=trade_data.take_profit,
                 reason=trade_data.reason,
-                status="PENDING",
+                status=status,
                 opened_at=datetime.utcnow()
             )
 
+            if mt5_ticket is not None:
+                trade.mt5_ticket = mt5_ticket
+
             db.add(trade)
-            await db.flush()
             await db.commit()
+            await db.refresh(trade)
 
             logger.info(
                 "trade_created",
@@ -107,30 +115,32 @@ class TradeService:
                 direction=trade.direction
             )
 
-            # Publish trade_opened event
-            event_bus = get_event_bus()
-            await event_bus.publish(
-                event_type="trade_opened",
-                data={
-                    "trade_id": str(trade.id),
-                    "master_id": str(master_id),
-                    "strategy_id": str(strategy_id) if strategy_id else None,
-                    "symbol": trade.symbol,
-                    "direction": trade.direction,
-                    "lots": trade.lots,
-                    "entry_price": trade.entry_price,
-                    "stop_loss": trade.stop_loss,
-                    "take_profit": trade.take_profit
-                },
-                source="trade_service",
-                severity="INFO"
-            )
+            # Publish TRADE_OPENED event (separate from DB transaction — do not rollback on failure)
+            try:
+                event_bus = get_event_bus()
+                await event_bus.publish(
+                    event_type=EventType.TRADE_OPENED.value,
+                    data={
+                        "trade_id": str(trade.id),
+                        "master_id": str(master_id),
+                        "strategy_id": str(strategy_id) if strategy_id else None,
+                        "symbol": trade.symbol,
+                        "direction": trade.direction,
+                        "lots": trade.lots,
+                        "entry_price": trade.entry_price,
+                        "stop_loss": trade.stop_loss,
+                        "take_profit": trade.take_profit
+                    },
+                    source="trade_service",
+                    severity="INFO"
+                )
+            except Exception as e:
+                logger.warning("event_publish_failed", error=str(e), trade_id=str(trade.id))
 
             return TradeResponse.model_validate(trade)
 
         except Exception as e:
             logger.error("create_trade_error", error=str(e), master_id=str(master_id))
-            await db.rollback()
             raise
 
     @staticmethod
@@ -221,29 +231,42 @@ class TradeService:
             if filters.get("symbol"):
                 stmt = stmt.where(Trade.symbol == filters["symbol"])
 
+            resolved_strategy_id = None
             if filters.get("strategy_code"):
                 strategy_stmt = select(Strategy.id).where(
                     Strategy.code == filters["strategy_code"]
                 )
                 strategy_result = await db.execute(strategy_stmt)
-                strategy_id = strategy_result.scalar_one_or_none()
-                if strategy_id:
-                    stmt = stmt.where(Trade.strategy_id == strategy_id)
+                resolved_strategy_id = strategy_result.scalar_one_or_none()
+                if resolved_strategy_id:
+                    stmt = stmt.where(Trade.strategy_id == resolved_strategy_id)
 
+            resolved_start_date = None
             if filters.get("start_date"):
-                start_date = filters["start_date"]
-                if isinstance(start_date, str):
-                    start_date = datetime.fromisoformat(start_date)
-                stmt = stmt.where(Trade.opened_at >= start_date)
+                resolved_start_date = filters["start_date"]
+                if isinstance(resolved_start_date, str):
+                    resolved_start_date = datetime.fromisoformat(resolved_start_date)
+                stmt = stmt.where(Trade.opened_at >= resolved_start_date)
 
+            resolved_end_date = None
             if filters.get("end_date"):
-                end_date = filters["end_date"]
-                if isinstance(end_date, str):
-                    end_date = datetime.fromisoformat(end_date)
-                stmt = stmt.where(Trade.opened_at <= end_date)
+                resolved_end_date = filters["end_date"]
+                if isinstance(resolved_end_date, str):
+                    resolved_end_date = datetime.fromisoformat(resolved_end_date)
+                stmt = stmt.where(Trade.opened_at <= resolved_end_date)
 
-            # Count total
-            count_stmt = select(func.count(Trade.id)).select_from(stmt.alias())
+            # Count total — rebuild with the same filters to avoid SQLAlchemy 2.x subquery issues
+            count_stmt = select(func.count(Trade.id)).where(Trade.master_id == master_id)
+            if filters.get("status"):
+                count_stmt = count_stmt.where(Trade.status == filters["status"])
+            if filters.get("symbol"):
+                count_stmt = count_stmt.where(Trade.symbol == filters["symbol"])
+            if resolved_strategy_id:
+                count_stmt = count_stmt.where(Trade.strategy_id == resolved_strategy_id)
+            if resolved_start_date is not None:
+                count_stmt = count_stmt.where(Trade.opened_at >= resolved_start_date)
+            if resolved_end_date is not None:
+                count_stmt = count_stmt.where(Trade.opened_at <= resolved_end_date)
             count_result = await db.execute(count_stmt)
             total = count_result.scalar() or 0
 
@@ -326,8 +349,8 @@ class TradeService:
 
             trade.updated_at = datetime.utcnow()
 
-            await db.flush()
             await db.commit()
+            await db.refresh(trade)
 
             logger.info(
                 "trade_updated",
@@ -336,30 +359,42 @@ class TradeService:
                 new_status=trade.status
             )
 
-            # Publish event if trade is being closed
+            # Publish event if trade is being closed (separate from DB transaction — do not rollback on failure)
             if is_closing:
-                event_bus = get_event_bus()
-                await event_bus.publish(
-                    event_type="trade_closed",
-                    data={
-                        "trade_id": str(trade.id),
-                        "master_id": str(trade.master_id),
-                        "symbol": trade.symbol,
-                        "direction": trade.direction,
-                        "entry_price": trade.entry_price,
-                        "exit_price": trade.exit_price,
-                        "profit": trade.profit,
-                        "net_profit": trade.net_profit
-                    },
-                    source="trade_service",
-                    severity="INFO"
-                )
+                # Look up strategy code if trade has a strategy_id
+                strategy_code = None
+                if trade.strategy_id:
+                    strategy_stmt = select(Strategy).where(Strategy.id == trade.strategy_id)
+                    strategy_result = await db.execute(strategy_stmt)
+                    strategy_obj = strategy_result.scalar_one_or_none()
+                    if strategy_obj:
+                        strategy_code = strategy_obj.code
+
+                try:
+                    event_bus = get_event_bus()
+                    await event_bus.publish(
+                        event_type=EventType.TRADE_CLOSED.value,
+                        data={
+                            "trade_id": str(trade.id),
+                            "master_id": str(trade.master_id),
+                            "strategy_code": strategy_code,
+                            "symbol": trade.symbol,
+                            "direction": trade.direction,
+                            "entry_price": trade.entry_price,
+                            "exit_price": trade.exit_price,
+                            "profit": trade.profit,
+                            "net_profit": trade.net_profit
+                        },
+                        source="trade_service",
+                        severity="INFO"
+                    )
+                except Exception as e:
+                    logger.warning("event_publish_failed", error=str(e), trade_id=str(trade_id))
 
             return TradeResponse.model_validate(trade)
 
         except Exception as e:
             logger.error("update_trade_error", error=str(e), trade_id=str(trade_id))
-            await db.rollback()
             raise
 
     @staticmethod
@@ -486,7 +521,7 @@ class TradeService:
 
             # Calculate statistics
             total_trades = len(trades)
-            profits = [t.net_profit for t in trades]
+            profits = [t.net_profit or 0.0 for t in trades]
             winning_trades = sum(1 for p in profits if p > 0)
             losing_trades = sum(1 for p in profits if p < 0)
             total_profit = sum(profits)

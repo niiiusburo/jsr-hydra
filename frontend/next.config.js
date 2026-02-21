@@ -2,11 +2,11 @@
 const nextConfig = {
   output: 'standalone',
   typescript: {
-    ignoreBuildErrors: true,
+    ignoreBuildErrors: false,
   },
-  env: {
-    NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000',
-  },
+  // Do NOT set NEXT_PUBLIC_API_URL or add rewrites() here.
+  // All /api/* requests use relative URLs and are routed through
+  // Caddy reverse proxy to jsr-backend:8000.
 }
 
 module.exports = nextConfig

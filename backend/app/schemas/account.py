@@ -44,12 +44,12 @@ class AccountResponse(BaseModel):
     @field_validator('mt5_login')
     @classmethod
     def validate_mt5_login(cls, v: int) -> int:
-        """Validate MT5 login is positive."""
-        if v <= 0:
-            raise ValueError('mt5_login must be greater than 0')
+        """Validate MT5 login is non-negative (0 allowed for dry-run mode)."""
+        if v < 0:
+            raise ValueError('mt5_login must be non-negative')
         return v
 
-    @field_validator('balance', 'equity', 'peak_equity')
+    @field_validator('balance', 'peak_equity')
     @classmethod
     def validate_monetary(cls, v: float) -> float:
         """Validate monetary amounts are non-negative."""
@@ -60,10 +60,8 @@ class AccountResponse(BaseModel):
     @field_validator('drawdown_pct')
     @classmethod
     def validate_drawdown(cls, v: float) -> float:
-        """Validate drawdown is between 0 and 100."""
-        if not 0 <= v <= 100:
-            raise ValueError('drawdown_pct must be between 0 and 100')
-        return v
+        """Clamp drawdown to [0, 100] range."""
+        return min(100.0, max(0.0, v))
 
 
 class FollowerResponse(BaseModel):

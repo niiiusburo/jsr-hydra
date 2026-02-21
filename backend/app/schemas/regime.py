@@ -31,7 +31,7 @@ class RegimeResponse(BaseModel):
 
     id: UUID
     regime: str
-    confidence: float
+    confidence: Optional[float] = None
     conviction_score: Optional[int] = None
     hmm_state: Optional[int] = None
     is_drifting: bool
@@ -40,8 +40,10 @@ class RegimeResponse(BaseModel):
 
     @field_validator('confidence')
     @classmethod
-    def validate_confidence(cls, v: float) -> float:
-        """Validate confidence is between 0 and 1."""
+    def validate_confidence(cls, v: Optional[float]) -> Optional[float]:
+        """Validate confidence is between 0 and 1, or None."""
+        if v is None:
+            return v
         if not 0 <= v <= 1:
             raise ValueError('confidence must be between 0 and 1')
         return v

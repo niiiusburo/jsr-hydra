@@ -1,35 +1,44 @@
 services:
   jsr-mt5:
-    image: gmag11/metatrader5_vnc
+    build:
+      context: ./infra/mt5
+      dockerfile: Dockerfile
     container_name: jsr-mt5
     ports:
-      - "5900:5900"
+      - "127.0.0.1:5900:5900"
+      - "127.0.0.1:6901:6901"
       - "18812:18812"
     volumes:
       - jsr-mt5data:/config
     environment:
       - CUSTOM_USER=${MT5_VNC_USER:-admin}
       - PASSWORD=${MT5_VNC_PASSWORD:-admin}
+      - MT5_LOGIN=${MT5_LOGIN:-0}
+      - MT5_PASSWORD=${MT5_PASSWORD:-}
+      - MT5_SERVER=${MT5_SERVER:-}
     healthcheck:
-      test: ["CMD", "pgrep", "-f", "terminal64.exe"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:18812/health || exit 1"]
       interval: 30s
       timeout: 10s
-      retries: 5
-      start_period: 120s
+      retries: 10
+      start_period: 180s
     restart: unless-stopped
     deploy:
       resources:
         limits:
           cpus: "1.0"
           memory: 2G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - jsr-network
 
   jsr-postgres:
     image: postgres:16-alpine
     container_name: jsr-postgres
-    ports:
-      - "5432:5432"
     environment:
       POSTGRES_DB: jsr_hydra
       POSTGRES_USER: ${DB_USER:-postgres}
@@ -47,14 +56,20 @@ services:
         limits:
           cpus: "1.0"
           memory: 1G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - jsr-network
 
   jsr-redis:
     image: redis:7-alpine
     container_name: jsr-redis
-    ports:
-      - "6379:6379"
+    volumes:
+      - jsr-redisdata:/data
+    command: redis-server --appendonly yes
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -66,6 +81,11 @@ services:
         limits:
           cpus: "0.5"
           memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - jsr-network
 
@@ -77,23 +97,44 @@ services:
     ports:
       - "8000:8000"
     environment:
+      - APP_ENV=${APP_ENV:-development}
       - DATABASE_URL=postgresql+asyncpg://${DB_USER:-postgres}:${DB_PASS:-postgres}@jsr-postgres:5432/jsr_hydra
       - REDIS_URL=redis://jsr-redis:6379/0
       - MT5_HOST=jsr-mt5
       - MT5_RPYC_PORT=18812
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1/chat/completions}
+      - ZAI_API_KEY=${ZAI_API_KEY:-}
+      - ZAI_MODEL=${ZAI_MODEL:-glm-4.6}
+      - ZAI_BASE_URL=${ZAI_BASE_URL:-https://api.z.ai/api/paas/v4/chat/completions}
+      - BRAIN_LLM_PROVIDER=${BRAIN_LLM_PROVIDER:-openai}
     env_file:
       - .env
+    volumes:
+      - ./version.json:/app/version.json:ro
     depends_on:
       jsr-postgres:
         condition: service_healthy
       jsr-redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8000/api/system/health\")' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
     deploy:
       resources:
         limits:
           cpus: "1.0"
           memory: 1G
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - jsr-network
 
@@ -104,15 +145,27 @@ services:
     container_name: jsr-engine
     command: python -m app.engine.engine_runner
     environment:
+      - APP_ENV=${APP_ENV:-development}
       - DATABASE_URL=postgresql+asyncpg://${DB_USER:-postgres}:${DB_PASS:-postgres}@jsr-postgres:5432/jsr_hydra
       - REDIS_URL=redis://jsr-redis:6379/0
       - MT5_HOST=jsr-mt5
       - MT5_RPYC_PORT=18812
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1/chat/completions}
+      - ZAI_API_KEY=${ZAI_API_KEY:-}
+      - ZAI_MODEL=${ZAI_MODEL:-glm-4.6}
+      - ZAI_BASE_URL=${ZAI_BASE_URL:-https://api.z.ai/api/paas/v4/chat/completions}
+      - BRAIN_LLM_PROVIDER=${BRAIN_LLM_PROVIDER:-openai}
     env_file:
       - .env
     depends_on:
+      jsr-postgres:
+        condition: service_healthy
+      jsr-redis:
+        condition: service_healthy
       jsr-backend:
-        condition: service_started
+        condition: service_healthy
       jsr-mt5:
         condition: service_healthy
     restart: unless-stopped
@@ -123,15 +176,27 @@ services:
           memory: 2G
     volumes:
       - jsr-mlmodels:/app/models
+      - ./version.json:/app/version.json:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - jsr-network
 
+  # NOT YET IMPLEMENTED (Phase 3) — RL model retrainer.
+  # This service is gated behind the "retrainer" profile so it will NOT start
+  # with a normal `docker compose up`. To run it explicitly:
+  #   docker compose --profile retrainer up jsr-retrainer
+  # The retrainer will exit gracefully if no RL state / model files exist yet.
   jsr-retrainer:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: jsr-retrainer
     command: python -m app.engine.retrainer
+    profiles: ["retrainer"]
     environment:
       - DATABASE_URL=postgresql+asyncpg://${DB_USER:-postgres}:${DB_PASS:-postgres}@jsr-postgres:5432/jsr_hydra
       - REDIS_URL=redis://jsr-redis:6379/0
@@ -140,14 +205,19 @@ services:
     depends_on:
       jsr-backend:
         condition: service_started
-    restart: unless-stopped
+    restart: on-failure  # Don't restart on clean exit (exit 0 = no data to retrain)
     deploy:
       resources:
         limits:
           cpus: "2.0"
-          memory: 4G
+          memory: 256m
     volumes:
       - jsr-mlmodels:/app/models
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - jsr-network
 
@@ -158,8 +228,6 @@ services:
     container_name: jsr-frontend
     ports:
       - "3000:3000"
-    environment:
-      - NEXT_PUBLIC_API_URL=http://jsr-backend:8000
     depends_on:
       - jsr-backend
     restart: unless-stopped
@@ -168,6 +236,11 @@ services:
         limits:
           cpus: "0.5"
           memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - jsr-network
 
@@ -180,7 +253,15 @@ services:
     volumes:
       - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile
       - jsr-caddydata:/data
+    depends_on:
+      - jsr-backend
+      - jsr-frontend
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
     networks:
       - jsr-network
 
@@ -189,6 +270,7 @@ volumes:
   jsr-mt5data:
   jsr-mlmodels:
   jsr-caddydata:
+  jsr-redisdata:
 
 networks:
   jsr-network:

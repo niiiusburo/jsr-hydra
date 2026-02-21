@@ -14,14 +14,19 @@ import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, status
+from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
+from app.core.rate_limit import limiter
 from app.api import api_router
-from app.api.routes_ws import router as ws_router
+from app.api.routes_ws import router as ws_router, setup_ws_event_handlers
 from app.config.settings import settings
-from app.events.bus import get_event_bus
+from app.events.bus import get_event_bus, set_event_bus
+from app.events.handlers import register_all_handlers
 from app.utils.logger import setup_logging, get_logger
 from app.version import get_version
 
@@ -56,16 +61,103 @@ async def on_startup() -> None:
             dry_run=settings.DRY_RUN
         )
 
+        # Warn about insecure default credentials in dev mode
+        insecure = settings.get_insecure_defaults()
+        if insecure:
+            logger.warning(
+                "insecure_default_credentials",
+                message="Default credentials detected. Change these before deploying.",
+                settings=insecure,
+            )
+
+        # Run Alembic migrations to ensure schema is up to date
+        try:
+            from alembic.config import Config
+            from alembic import command
+            alembic_cfg = Config("/app/alembic.ini")
+            command.upgrade(alembic_cfg, "head")
+            logger.info("alembic_upgrade_complete")
+        except Exception as e:
+            logger.warning("alembic_upgrade_skipped", error=str(e))
+
         # Connect to EventBus
         event_bus = get_event_bus()
         await event_bus.connect()
+        # Store the connected instance as the global singleton so all
+        # modules that call get_event_bus() share this connected bus.
+        set_event_bus(event_bus)
         logger.info("event_bus_connected")
 
-        # TODO: Register event handlers for background tasks:
-        # - Trade closed handler (calculate stats)
-        # - Regime changed handler (alert frontend)
-        # - Kill switch handler (emergency procedures)
-        # - etc.
+        # Register event handlers
+        register_all_handlers(event_bus)
+        logger.info("event_handlers_registered")
+
+        # Register WebSocket broadcast handlers for real-time client updates
+        await setup_ws_event_handlers(event_bus)
+        logger.info("ws_event_handlers_registered")
+
+        # Start Redis subscription listener as a background task so this
+        # process receives events published by other processes (e.g., engine).
+        asyncio.create_task(event_bus.subscribe_redis())
+        logger.info("redis_subscription_started")
+
+        # Seed default strategies so API endpoints work even without the engine
+        try:
+            from app.db.engine import AsyncSessionLocal
+            from app.models.strategy import Strategy
+            from sqlalchemy import select
+
+            async with AsyncSessionLocal() as session:
+                default_rows = [
+                    ("A", "Trend Following"),
+                    ("B", "Mean Reversion"),
+                    ("C", "Session Breakout"),
+                    ("D", "Momentum Scalper"),
+                    ("E", "Range Scalper (Sideways)"),
+                ]
+                seeded_count = 0
+                for code, name in default_rows:
+                    existing = await session.execute(select(Strategy).where(Strategy.code == code))
+                    if existing.scalar_one_or_none():
+                        continue
+
+                    row_status = "active" if code in {"A", "B", "C", "D"} else "paused"
+                    allocation_pct = 25.0 if row_status == "active" else 0.0
+                    session.add(
+                        Strategy(
+                            code=code,
+                            name=name,
+                            status=row_status,
+                            allocation_pct=allocation_pct,
+                        )
+                    )
+                    seeded_count += 1
+
+                if seeded_count > 0:
+                    await session.commit()
+                    logger.info("default_strategies_seeded", count=seeded_count)
+        except Exception as e:
+            logger.warning("strategy_seeding_failed", error=str(e))
+
+        # Ensure a MasterAccount row exists so trade endpoints can reference it
+        try:
+            from app.db.engine import AsyncSessionLocal
+            from app.models.account import MasterAccount
+            from sqlalchemy import select
+
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(select(MasterAccount).limit(1))
+                if not result.scalar_one_or_none():
+                    master = MasterAccount(
+                        mt5_login=settings.MT5_LOGIN or 99999,
+                        broker=settings.MT5_SERVER or "Unknown",
+                        status="RUNNING",
+                    )
+                    session.add(master)
+                    await session.commit()
+                    logger.info("default_master_account_seeded")
+        except Exception as e:
+            logger.warning("master_account_seeding_failed", error=str(e))
 
         logger.info("application_startup_complete")
 
@@ -155,12 +247,20 @@ async def validation_exception_handler(
         error_count=len(exc.errors())
     )
 
+    safe_errors = jsonable_encoder(
+        exc.errors(),
+        custom_encoder={
+            ValueError: lambda e: str(e),
+            Exception: lambda e: str(e),
+        },
+    )
+
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={
             "status": "error",
             "detail": "Request validation failed",
-            "errors": exc.errors(),
+            "errors": safe_errors,
         },
     )
 
@@ -215,6 +315,10 @@ def create_app() -> FastAPI:
     Raises:
         Exception: If version.json is not accessible
     """
+    # Fail fast if non-dev config still has insecure defaults.
+    # In dev mode, warnings are logged during startup instead.
+    settings.validate_credentials()
+
     # Get version info
     try:
         version_data = get_version()
@@ -242,13 +346,33 @@ def create_app() -> FastAPI:
     # Middleware
     # ────────────────────────────────────────────────────────────
 
-    # CORS middleware - allow all origins in development
+    # Rate limiting (slowapi) — must be attached before CORS so the
+    # limiter state is available on the app instance for all routes.
+    app.state.limiter = limiter
+    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+    # CORS middleware - restricted to known frontend origins.
+    #
+    # H-25 CSRF note: This application uses JWT Bearer tokens sent via the
+    # Authorization header (see app/api/auth.py). Browsers do NOT attach
+    # custom headers automatically on cross-origin requests, so CSRF attacks
+    # cannot forge authenticated requests. Explicit CSRF tokens are therefore
+    # not required. CORS is tightened below as defence-in-depth.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # TODO: Restrict to frontend URL in production
+        allow_origins=[
+            "https://ai.jsralgo.com",
+            "http://localhost:3000",
+            "http://localhost:8000",
+        ],
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "X-API-Key",
+            "X-Request-ID",
+        ],
     )
 
     # ────────────────────────────────────────────────────────────

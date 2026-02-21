@@ -26,6 +26,7 @@ from app.schemas.regime import RegimeResponse
 from app.schemas.strategy import StrategyMetrics
 from app.schemas.trade import TradeResponse
 from app.config.settings import settings
+from app.version import get_version
 from app.services.account_service import AccountService
 from app.services.regime_service import RegimeService
 from app.services.strategy_service import StrategyService
@@ -120,6 +121,7 @@ class DashboardService:
                 severity="INFO"
             )
 
+            version = get_version().get("version", "1.0.0")
             return DashboardSummary(
                 account=account,
                 regime=regime,
@@ -128,7 +130,7 @@ class DashboardService:
                 recent_trades=recent_trades,
                 equity_curve=equity_curve,
                 system_status=system_status,
-                version=settings.VERSION if hasattr(settings, "VERSION") else "1.0.0"
+                version=version
             )
 
         except Exception as e:

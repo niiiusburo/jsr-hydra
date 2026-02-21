@@ -2,13 +2,13 @@
 MT5 Bridge Module
 
 PURPOSE: Provides factory function and exports for the MT5 bridge components.
-This module encapsulates all MT5 RPyC connectivity via mt5linux library.
+This module encapsulates all MT5 connectivity via HTTP REST bridge (httpx).
 
 Exports:
-    - MT5Connector: RPyC connection manager to MT5 Docker container
-    - DataFeed: OHLCV data feed with dry-run support
+    - MT5Connector: HTTP connection manager to MT5 REST bridge
+    - DataFeed: OHLCV data feed (always real MT5 data)
     - OrderManager: Position management with idempotency and Redis
-    - AccountInfo: Account reconciliation and balance tracking
+    - AccountInfo: Account balance/equity tracking with caching
     - create_bridge: Factory function to instantiate all bridge components
 """
 
@@ -29,53 +29,30 @@ def create_bridge(
 
     Args:
         settings: Dict containing:
-            - host: str - MT5 Docker RPyC server host (e.g., "localhost")
-            - port: int - MT5 Docker RPyC server port (e.g., 18861)
-            - login: int - MT5 account login number
-            - password: str - MT5 account password
-            - server: str - MT5 server name (e.g., "VolatilityUltra-Demo")
-            - redis_url: str - Redis connection URL (e.g., "redis://localhost:6379")
-            - dry_run: bool - Enable dry-run mode with mock data (default: True)
+            - mt5_rest_url: str - MT5 REST bridge URL (default "http://jsr-mt5:18812")
+            - redis_url: str - Redis connection URL (default "redis://localhost:6379")
+            - dry_run: bool - Enable dry-run mode (default True)
+            - max_test_lots: float - Max lot size during testing (default 0.01)
 
     Returns:
         tuple[MT5Connector, DataFeed, OrderManager, AccountInfo]: Bridge components
-
-    Raises:
-        KeyError: If required settings keys are missing
-        ConnectionError: If MT5 connection fails
     """
     # Extract settings
-    host = settings.get("host", "localhost")
-    port = settings.get("port", 18861)
-    login = settings.get("login")
-    password = settings.get("password")
-    server = settings.get("server")
+    mt5_rest_url = settings.get("mt5_rest_url", "http://jsr-mt5:18812")
     redis_url = settings.get("redis_url", "redis://localhost:6379")
     dry_run = settings.get("dry_run", True)
+    max_test_lots = settings.get("max_test_lots", 0.01)
 
-    # Validate required settings
-    if login is None:
-        raise KeyError("settings['login'] is required")
-    if password is None:
-        raise KeyError("settings['password'] is required")
-    if server is None:
-        raise KeyError("settings['server'] is required")
-
-    # Create connector
-    connector = MT5Connector(
-        host=host,
-        port=port,
-        login=login,
-        password=password,
-        server=server
-    )
+    # Create connector (HTTP-based)
+    connector = MT5Connector(base_url=mt5_rest_url)
 
     # Create other components
     data_feed = DataFeed(connector=connector, dry_run=dry_run)
     order_manager = OrderManager(
         connector=connector,
         redis_url=redis_url,
-        dry_run=dry_run
+        dry_run=dry_run,
+        max_test_lots=max_test_lots,
     )
     account_info = AccountInfo(connector=connector, dry_run=dry_run)
 

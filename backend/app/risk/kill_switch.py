@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Optional
 
 from app.bridge.order_manager import OrderManager
-from app.config.constants import MaxDrawdownPct, DailyLossLimitPct
+from app.config.constants import EventType, MaxDrawdownPct, DailyLossLimitPct
 from app.config.settings import settings
 from app.events.bus import get_event_bus
 from app.utils.logger import get_logger
@@ -36,6 +36,9 @@ class KillSwitch:
         _lock: Asyncio lock for thread-safe operations.
     """
 
+    # Recovery ramp: position size multipliers after kill switch reset
+    RECOVERY_RAMP = [0.25, 0.50, 0.75, 1.0]
+
     def __init__(self, order_manager: OrderManager) -> None:
         """
         PURPOSE: Initialize kill switch with order manager dependency.
@@ -47,6 +50,9 @@ class KillSwitch:
         self._triggered_at: Optional[datetime] = None
         self._order_manager: OrderManager = order_manager
         self._lock: asyncio.Lock = asyncio.Lock()
+        # Recovery mode: ramp position sizes back up after reset
+        self._in_recovery: bool = False
+        self._recovery_trades_completed: int = 0
         logger.info("kill_switch_initialized")
 
     def check_drawdown(
@@ -201,10 +207,10 @@ class KillSwitch:
 
             # Close all open positions
             try:
-                closed_positions = self._order_manager.close_all_positions()
+                closed_positions = await self._order_manager.close_all_positions()
                 logger.info(
                     "kill_switch_closed_positions",
-                    count=len(closed_positions)
+                    count=len(closed_positions) if closed_positions else 0
                 )
             except Exception as e:
                 logger.error(
@@ -216,7 +222,7 @@ class KillSwitch:
             try:
                 event_bus = get_event_bus()
                 await event_bus.publish(
-                    event_type="KILL_SWITCH_TRIGGERED",
+                    event_type=EventType.KILL_SWITCH_TRIGGERED.value,
                     data={
                         "triggered_at": self._triggered_at.isoformat(),
                         "closed_positions": len(closed_positions) if 'closed_positions' in locals() else 0
@@ -263,7 +269,43 @@ class KillSwitch:
 
         self._is_active = False
         self._triggered_at = None
+        # Enter recovery mode: ramp position sizes gradually
+        self._in_recovery = True
+        self._recovery_trades_completed = 0
 
         logger.warning(
-            "kill_switch_reset_by_admin"
+            "kill_switch_reset_by_admin",
+            recovery_mode=True,
         )
+
+    @property
+    def recovery_multiplier(self) -> float:
+        """
+        PURPOSE: Get current position size multiplier during recovery.
+
+        Returns 1.0 when not in recovery mode. During recovery, ramps
+        from 0.25 → 0.50 → 0.75 → 1.0 over 4 trades.
+
+        CALLED BY: RiskManager.pre_trade_check
+        """
+        if not self._in_recovery:
+            return 1.0
+        idx = min(self._recovery_trades_completed, len(self.RECOVERY_RAMP) - 1)
+        return self.RECOVERY_RAMP[idx]
+
+    def record_recovery_trade(self) -> None:
+        """
+        PURPOSE: Record a completed trade during recovery and auto-exit
+        recovery mode when the ramp is complete.
+
+        CALLED BY: RiskManager.post_trade_update
+        """
+        if not self._in_recovery:
+            return
+        self._recovery_trades_completed += 1
+        if self._recovery_trades_completed >= len(self.RECOVERY_RAMP):
+            self._in_recovery = False
+            logger.info(
+                "kill_switch_recovery_complete",
+                trades_completed=self._recovery_trades_completed,
+            )

@@ -1,7 +1,7 @@
 'use client'
 
 import React from 'react'
-import { LineChart, Line, Area, AreaChart, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
+import { Area, AreaChart, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
 import { Card } from '@/components/ui/Card'
 
 interface EquityPoint {
@@ -13,37 +13,6 @@ interface EquityChartProps {
   data?: EquityPoint[]
   loading?: boolean
 }
-
-const mockData: EquityPoint[] = [
-  { timestamp: '2026-01-20', value: 100000 },
-  { timestamp: '2026-01-21', value: 100500 },
-  { timestamp: '2026-01-22', value: 100200 },
-  { timestamp: '2026-01-23', value: 101000 },
-  { timestamp: '2026-01-24', value: 101500 },
-  { timestamp: '2026-01-25', value: 101200 },
-  { timestamp: '2026-01-26', value: 102000 },
-  { timestamp: '2026-01-27', value: 101800 },
-  { timestamp: '2026-01-28', value: 102500 },
-  { timestamp: '2026-01-29', value: 102300 },
-  { timestamp: '2026-01-30', value: 103000 },
-  { timestamp: '2026-01-31', value: 102800 },
-  { timestamp: '2026-02-01', value: 103500 },
-  { timestamp: '2026-02-02', value: 104000 },
-  { timestamp: '2026-02-03', value: 103700 },
-  { timestamp: '2026-02-04', value: 104500 },
-  { timestamp: '2026-02-05', value: 104200 },
-  { timestamp: '2026-02-06', value: 105000 },
-  { timestamp: '2026-02-07', value: 104800 },
-  { timestamp: '2026-02-08', value: 105500 },
-  { timestamp: '2026-02-09', value: 105800 },
-  { timestamp: '2026-02-10', value: 106000 },
-  { timestamp: '2026-02-11', value: 105700 },
-  { timestamp: '2026-02-12', value: 106500 },
-  { timestamp: '2026-02-13', value: 106800 },
-  { timestamp: '2026-02-14', value: 107000 },
-  { timestamp: '2026-02-15', value: 107500 },
-  { timestamp: '2026-02-16', value: 107800 },
-]
 
 const CustomTooltip = ({ active, payload }: any) => {
   if (active && payload && payload.length) {
@@ -60,11 +29,23 @@ const CustomTooltip = ({ active, payload }: any) => {
   return null
 }
 
-export function EquityChart({ data = mockData, loading = false }: EquityChartProps) {
+export function EquityChart({ data, loading = false }: EquityChartProps) {
   if (loading) {
     return (
       <Card title="Equity Curve (30 Days)">
         <div className="h-64 bg-gray-700/50 rounded animate-pulse" />
+      </Card>
+    )
+  }
+
+  if (!data || data.length === 0) {
+    return (
+      <Card title="Equity Curve (30 Days)">
+        <div className="h-64 flex items-center justify-center">
+          <p className="text-gray-400 text-sm">
+            Equity curve data is not yet available. It will appear once the system records equity snapshots.
+          </p>
+        </div>
       </Card>
     )
   }
@@ -90,7 +71,7 @@ export function EquityChart({ data = mockData, loading = false }: EquityChartPro
             tick={{ fill: '#9CA3AF', fontSize: 12 }}
             stroke="#4B5563"
             domain={['dataMin', 'dataMax']}
-            tickFormatter={(value) => `$${(value / 1000).toFixed(0)}k`}
+            tickFormatter={(value) => value >= 1000 ? `$${(value / 1000).toFixed(0)}k` : `$${value.toFixed(0)}`}
           />
           <Tooltip content={<CustomTooltip />} />
           <Area

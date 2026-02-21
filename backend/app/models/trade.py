@@ -69,6 +69,8 @@ class Trade(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_trades_master_status", "master_id", "status"),
         Index("ix_trades_strategy_opened", "strategy_id", "opened_at"),
+        Index("ix_trades_status", "status"),
+        Index("ix_trades_closed_at", "closed_at"),
     )
 
     # Relationships

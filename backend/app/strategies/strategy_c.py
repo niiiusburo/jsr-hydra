@@ -74,8 +74,8 @@ class StrategyC(BaseStrategy):
         )
 
         # Set configuration with defaults
-        self._lookback_bars = config.get('lookback_bars', 24)
-        self._breakout_atr_mult = config.get('breakout_atr_mult', 1.5)
+        self._lookback_bars = config.get('lookback_bars', 12)
+        self._breakout_atr_mult = config.get('breakout_atr_mult', 0.5)
         self._atr_period = config.get('atr_period', 14)
         self._timeframe = config.get('timeframe', 'H1')
         self._lookback = config.get('lookback', 50)

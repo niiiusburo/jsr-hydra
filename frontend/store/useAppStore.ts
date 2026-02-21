@@ -10,6 +10,7 @@ import {
   TradeList,
   StrategyResponse,
   RegimeResponse,
+  RegimeData,
 } from "../lib/types";
 
 interface AppState {
@@ -17,7 +18,7 @@ interface AppState {
   dashboard: DashboardSummary | null;
   trades: TradeList | null;
   strategies: StrategyResponse[];
-  regime: RegimeResponse | null;
+  regime: RegimeResponse | RegimeData | null;
 
   // UI State
   isLoading: boolean;
@@ -31,7 +32,7 @@ interface AppState {
   setDashboard: (data: DashboardSummary) => void;
   setTrades: (data: TradeList) => void;
   setStrategies: (data: StrategyResponse[]) => void;
-  setRegime: (data: RegimeResponse) => void;
+  setRegime: (data: RegimeResponse | RegimeData) => void;
   setToken: (token: string) => void;
   clearToken: () => void;
   setLoading: (isLoading: boolean) => void;
@@ -71,7 +72,7 @@ export const useAppStore = create<AppState>()(
           error: null,
         }),
 
-      setRegime: (data: RegimeResponse) =>
+      setRegime: (data: RegimeResponse | RegimeData) =>
         set({
           regime: data,
           error: null,

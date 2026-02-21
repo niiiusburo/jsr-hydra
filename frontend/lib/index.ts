@@ -9,4 +9,5 @@ export {
   getWebSocketClient,
   closeWebSocketClient,
 } from "./ws";
+export type { WsStatus, WsConfig } from "./ws";
 export * from "./types";

@@ -80,6 +80,7 @@ class StrategyA(BaseStrategy):
         self._ema_fast = config.get('ema_fast', 9)
         self._ema_slow = config.get('ema_slow', 21)
         self._atr_period = config.get('atr_period', 14)
+        self._adx_period = config.get('adx_period', 14)
         self._adx_threshold = config.get('adx_threshold', 25)
         self._timeframe = config.get('timeframe', 'H1')
         self._lookback = config.get('lookback', 50)
@@ -93,6 +94,7 @@ class StrategyA(BaseStrategy):
             ema_fast=self._ema_fast,
             ema_slow=self._ema_slow,
             atr_period=self._atr_period,
+            adx_period=self._adx_period,
             adx_threshold=self._adx_threshold
         )
 
@@ -136,7 +138,7 @@ class StrategyA(BaseStrategy):
             # Calculate indicators
             ema_fast = ema(close, self._ema_fast)
             ema_slow = ema(close, self._ema_slow)
-            adx_values = adx(high, low, close, self._atr_period)
+            adx_values = adx(high, low, close, self._adx_period)
             atr_values = atr(high, low, close, self._atr_period)
 
             # Get latest values
@@ -181,7 +183,9 @@ class StrategyA(BaseStrategy):
 
             prev_ema_fast_above_slow = prev_ema_fast > prev_ema_slow
 
-            # Detect crossover
+            # Detect crossover or continuation
+            is_continuation = False
+
             if current_ema_fast_above_slow and not prev_ema_fast_above_slow:
                 # Bullish crossover: EMA fast crossed above EMA slow
                 signal_direction = OrderDirection.BUY
@@ -201,16 +205,52 @@ class StrategyA(BaseStrategy):
                     adx=latest_adx
                 )
             else:
-                # No crossover detected
-                return None
+                # No crossover detected — check for trend continuation
+                allow_continuation = self._config.get('allow_continuation', True)
+                if allow_continuation:
+                    pullback_atr_mult = 0.3
+                    if current_ema_fast_above_slow:
+                        # Uptrend: price pulled back to within 0.3*ATR of EMA fast
+                        distance_to_ema = abs(latest_close - latest_ema_fast)
+                        if distance_to_ema <= pullback_atr_mult * latest_atr and latest_close >= latest_ema_fast - pullback_atr_mult * latest_atr:
+                            signal_direction = OrderDirection.BUY
+                            is_continuation = True
+                            logger.info(
+                                "bullish_continuation_detected",
+                                ema_fast=latest_ema_fast,
+                                close=latest_close,
+                                distance=distance_to_ema,
+                                atr=latest_atr,
+                                adx=latest_adx
+                            )
+                        else:
+                            return None
+                    else:
+                        # Downtrend: price rallied back to within 0.3*ATR of EMA fast
+                        distance_to_ema = abs(latest_close - latest_ema_fast)
+                        if distance_to_ema <= pullback_atr_mult * latest_atr and latest_close <= latest_ema_fast + pullback_atr_mult * latest_atr:
+                            signal_direction = OrderDirection.SELL
+                            is_continuation = True
+                            logger.info(
+                                "bearish_continuation_detected",
+                                ema_fast=latest_ema_fast,
+                                close=latest_close,
+                                distance=distance_to_ema,
+                                atr=latest_atr,
+                                adx=latest_adx
+                            )
+                        else:
+                            return None
+                else:
+                    return None
 
             # Calculate stop-loss and take-profit using ATR
             if signal_direction == OrderDirection.BUY:
-                sl_price = latest_close - (atr_values.iloc[-1] * 2.0)
-                tp_price = latest_close + (atr_values.iloc[-1] * 3.0)
+                sl_price = latest_close - (latest_atr * 2.0)
+                tp_price = latest_close + (latest_atr * 3.0)
             else:  # SELL
-                sl_price = latest_close + (atr_values.iloc[-1] * 2.0)
-                tp_price = latest_close - (atr_values.iloc[-1] * 3.0)
+                sl_price = latest_close + (latest_atr * 2.0)
+                tp_price = latest_close - (latest_atr * 3.0)
 
             # Ensure SL and TP are valid
             if sl_price <= 0 or tp_price <= 0:
@@ -221,8 +261,13 @@ class StrategyA(BaseStrategy):
                 )
                 return None
 
-            # Calculate confidence based on ADX (0-1 scale, clamped)
-            confidence = min(latest_adx / 50.0, 1.0)
+            # Calculate confidence: continuation signals get lower confidence (0.55)
+            if is_continuation:
+                confidence = 0.55
+                reason_str = f"Trend continuation: EMA {self._ema_fast}/{self._ema_slow} aligned, pullback to EMA, ADX={latest_adx:.2f}"
+            else:
+                confidence = min(latest_adx / 50.0, 1.0)
+                reason_str = f"EMA {self._ema_fast}/{self._ema_slow} crossover with ADX={latest_adx:.2f}"
 
             # Create and return signal
             signal = StrategySignal(
@@ -230,7 +275,7 @@ class StrategyA(BaseStrategy):
                 confidence=confidence,
                 sl_price=sl_price,
                 tp_price=tp_price,
-                reason=f"EMA {self._ema_fast}/{self._ema_slow} crossover with ADX={latest_adx:.2f}",
+                reason=reason_str,
                 strategy_code=self._code.value
             )
 
@@ -240,7 +285,8 @@ class StrategyA(BaseStrategy):
                 confidence=confidence,
                 sl=sl_price,
                 tp=tp_price,
-                atr=latest_atr
+                atr=latest_atr,
+                signal_type="continuation" if is_continuation else "crossover"
             )
 
             self._last_signal_direction = signal_direction
@@ -268,6 +314,7 @@ class StrategyA(BaseStrategy):
             "ema_fast": self._ema_fast,
             "ema_slow": self._ema_slow,
             "atr_period": self._atr_period,
+            "adx_period": self._adx_period,
             "adx_threshold": self._adx_threshold,
             "timeframe": self._timeframe,
             "lookback": self._lookback,

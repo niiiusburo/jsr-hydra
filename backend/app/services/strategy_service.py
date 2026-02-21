@@ -282,9 +282,9 @@ class StrategyService:
             win_rate_7d, profit_factor_7d = calc_metrics(trades_7d)
             win_rate_30d, profit_factor_30d = calc_metrics(trades_30d)
 
-            # Today's metrics
+            # Today's metrics (only count closed trades for P&L)
             trades_today = len([t for t in today_trades if t.status == "CLOSED"])
-            pnl_today = sum(t.net_profit for t in today_trades)
+            pnl_today = sum(t.net_profit or 0.0 for t in today_trades if t.status == "CLOSED")
 
             logger.info(
                 "strategy_metrics_calculated",

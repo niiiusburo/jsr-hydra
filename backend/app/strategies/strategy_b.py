@@ -17,6 +17,7 @@ from app.config.constants import StrategyCode
 from app.bridge.data_feed import DataFeed
 from app.bridge.order_manager import OrderManager
 from app.events.bus import EventBus
+from app.indicators.trend import adx as calc_adx
 from app.strategies.base import BaseStrategy
 from app.strategies.signals import StrategySignal
 from app.utils.logger import get_logger
@@ -75,7 +76,9 @@ class StrategyB(BaseStrategy):
         self._grid_levels = config.get('grid_levels', 5)
         self._grid_spacing_pct = config.get('grid_spacing_pct', 0.5)
         self._lookback = config.get('lookback', 50)
-        self._z_score_threshold = config.get('z_score_threshold', 2.0)
+        self._bb_period = config.get('bb_period', 20)
+        self._z_score_threshold = config.get('z_score_threshold', 1.5)
+        self._adx_max_threshold = config.get('adx_max_threshold', 30)
         self._timeframe = config.get('timeframe', 'H1')
         self._default_lots = config.get('default_lots', 1.0)
 
@@ -84,7 +87,9 @@ class StrategyB(BaseStrategy):
             grid_levels=self._grid_levels,
             grid_spacing_pct=self._grid_spacing_pct,
             lookback=self._lookback,
-            z_score_threshold=self._z_score_threshold
+            bb_period=self._bb_period,
+            z_score_threshold=self._z_score_threshold,
+            adx_max_threshold=self._adx_max_threshold
         )
 
     def generate_signal(self, candles_df: pd.DataFrame) -> Optional[StrategySignal]:
@@ -119,11 +124,27 @@ class StrategyB(BaseStrategy):
                 )
                 return None
 
+            # ADX trend filter: block mean-reversion signals in trending markets
+            if len(candles_df) >= 20:
+                adx_values = calc_adx(
+                    candles_df['high'], candles_df['low'], candles_df['close'], period=14
+                )
+                if not adx_values.empty:
+                    latest_adx = adx_values.iloc[-1]
+                    if not pd.isna(latest_adx) and latest_adx > self._adx_max_threshold:
+                        logger.info(
+                            "mean_reversion_blocked_by_adx",
+                            strategy_code=self._code.value,
+                            adx=latest_adx,
+                            threshold=self._adx_max_threshold,
+                        )
+                        return None
+
             # Calculate SMA (mean)
-            sma = candles_df['close'].rolling(window=20, min_periods=1).mean()
+            sma = candles_df['close'].rolling(window=self._bb_period, min_periods=1).mean()
 
             # Calculate standard deviation for Bollinger Bands
-            std = candles_df['close'].rolling(window=20, min_periods=1).std()
+            std = candles_df['close'].rolling(window=self._bb_period, min_periods=1).std()
 
             # Calculate Bollinger Bands
             upper_band = sma + 2 * std
@@ -295,6 +316,41 @@ class StrategyB(BaseStrategy):
             )
             return None
 
+    def update_parameters(self, updates: dict) -> dict:
+        """
+        PURPOSE: Apply dynamic parameter updates from Brain/LLM recommendations.
+
+        Args:
+            updates: Dict of parameter name -> new value
+
+        Returns:
+            dict: Actually applied changes {param: new_value}
+
+        CALLED BY: engine.py via BaseStrategy.update_parameters()
+        """
+        applied = {}
+        param_attr_map = {
+            'z_score_threshold': '_z_score_threshold',
+            'adx_max_threshold': '_adx_max_threshold',
+            'bb_period': '_bb_period',
+            'grid_levels': '_grid_levels',
+            'grid_spacing_pct': '_grid_spacing_pct',
+        }
+        for param, new_val in updates.items():
+            attr = param_attr_map.get(param)
+            if attr and hasattr(self, attr):
+                old_val = getattr(self, attr)
+                setattr(self, attr, new_val)
+                self._config[param] = new_val
+                applied[param] = new_val
+                logger.info(
+                    "strategy_b_param_updated",
+                    param=param,
+                    old_value=old_val,
+                    new_value=new_val,
+                )
+        return applied
+
     def get_config(self) -> dict:
         """
         PURPOSE: Return the strategy's current configuration.
@@ -311,7 +367,9 @@ class StrategyB(BaseStrategy):
             'grid_levels': self._grid_levels,
             'grid_spacing_pct': self._grid_spacing_pct,
             'lookback': self._lookback,
+            'bb_period': self._bb_period,
             'z_score_threshold': self._z_score_threshold,
+            'adx_max_threshold': self._adx_max_threshold,
             'timeframe': self._timeframe,
             'default_lots': self._default_lots,
         }

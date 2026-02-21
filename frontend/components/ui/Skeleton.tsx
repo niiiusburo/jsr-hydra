@@ -21,10 +21,26 @@ export function Skeleton({ variant, className = '' }: SkeletonProps) {
 
 export function SkeletonGrid() {
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-      {Array.from({ length: 4 }).map((_, i) => (
-        <Skeleton key={i} variant="card" />
-      ))}
+    <div className="space-y-6">
+      {/* Top Row: Account (2/3) + Regime (1/3) */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 md:gap-6">
+        <div className="lg:col-span-2">
+          <Skeleton variant="card" className="h-64" />
+        </div>
+        <Skeleton variant="card" className="h-64" />
+      </div>
+
+      {/* Equity Chart */}
+      <Skeleton variant="chart" />
+
+      {/* Strategies & System Status */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 md:gap-6">
+        <Skeleton variant="card" />
+        <Skeleton variant="card" />
+      </div>
+
+      {/* Recent Trades */}
+      <Skeleton variant="card" className="h-56" />
     </div>
   )
 }

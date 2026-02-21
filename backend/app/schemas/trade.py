@@ -37,6 +37,7 @@ class TradeCreate(BaseModel):
     take_profit: Optional[float] = None
     strategy_code: Optional[str] = None
     reason: Optional[str] = None
+    confidence: float = 0.0
 
     @field_validator('direction')
     @classmethod
@@ -96,6 +97,8 @@ class TradeResponse(BaseModel):
         id: Unique trade identifier (UUID)
         master_id: Master account identifier
         strategy_id: Associated strategy identifier
+        strategy_code: Optional strategy code (A-E)
+        strategy_name: Optional strategy name
         idempotency_key: Idempotency key for request deduplication
         mt5_ticket: MetaTrader 5 ticket number
         symbol: Trading pair symbol
@@ -125,6 +128,8 @@ class TradeResponse(BaseModel):
     id: UUID
     master_id: UUID
     strategy_id: Optional[UUID] = None
+    strategy_code: Optional[str] = None
+    strategy_name: Optional[str] = None
     idempotency_key: Optional[str] = None
     mt5_ticket: Optional[int] = None
     symbol: str

@@ -8,19 +8,56 @@ creating new trades, and retrieving trade statistics. All routes use proper Pyda
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select, and_, or_
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from sqlalchemy import select, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.auth import get_current_user
 from app.db.engine import get_db
+from app.models.strategy import Strategy
 from app.models.trade import Trade
 from app.schemas import TradeCreate, TradeResponse, TradeList, TradeStats
+from app.core.rate_limit import limiter, READ_LIMIT, WRITE_LIMIT
 from app.utils.logger import get_logger
 
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/trades", tags=["trades"])
+
+
+async def _load_strategy_lookup(
+    db: AsyncSession,
+    strategy_ids: set,
+) -> dict:
+    """Load strategy code/name metadata for a set of strategy IDs."""
+    if not strategy_ids:
+        return {}
+
+    result = await db.execute(
+        select(Strategy.id, Strategy.code, Strategy.name)
+        .where(Strategy.id.in_(strategy_ids))
+    )
+    rows = result.all()
+    return {
+        strategy_id: {"code": code, "name": name}
+        for strategy_id, code, name in rows
+    }
+
+
+def _attach_strategy_metadata(
+    trade: Trade,
+    strategy_lookup: dict,
+) -> TradeResponse:
+    """Convert trade ORM model to API response including strategy code/name."""
+    trade_response = TradeResponse.model_validate(trade)
+
+    if trade.strategy_id:
+        strategy_meta = strategy_lookup.get(trade.strategy_id)
+        if strategy_meta:
+            trade_response.strategy_code = strategy_meta.get("code")
+            trade_response.strategy_name = strategy_meta.get("name")
+
+    return trade_response
 
 
 # ════════════════════════════════════════════════════════════════
@@ -29,14 +66,16 @@ router = APIRouter(prefix="/trades", tags=["trades"])
 
 
 @router.get("", response_model=TradeList)
+@limiter.limit(READ_LIMIT)
 async def list_trades(
+    request: Request,
     page: int = Query(1, ge=1, description="Page number (1-indexed)"),
     per_page: int = Query(20, ge=1, le=100, description="Trades per page"),
     status_filter: Optional[str] = Query(None, description="Filter by status (open/closed)"),
     strategy_filter: Optional[str] = Query(None, description="Filter by strategy code"),
     symbol_filter: Optional[str] = Query(None, description="Filter by symbol"),
     days_ago: Optional[int] = Query(None, ge=0, description="Trades from last N days"),
-    current_user: str = Depends(get_current_user),
+    _current_user: str = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> TradeList:
     """
@@ -65,11 +104,10 @@ async def list_trades(
         filters = []
 
         if status_filter:
-            filters.append(Trade.status == status_filter)
+            filters.append(Trade.status == status_filter.upper())
 
         if strategy_filter:
-            from app.models.strategy import Strategy
-            strategy_subq = select(Strategy.id).where(Strategy.code == strategy_filter).scalar_subquery()
+            strategy_subq = select(Strategy.id).where(Strategy.code == strategy_filter.upper()).scalar_subquery()
             filters.append(Trade.strategy_id == strategy_subq)
 
         if symbol_filter:
@@ -80,12 +118,12 @@ async def list_trades(
             filters.append(Trade.opened_at >= cutoff_date)
 
         # Execute count query
-        count_stmt = select(Trade)
+        count_stmt = select(func.count(Trade.id))
         if filters:
             count_stmt = count_stmt.where(and_(*filters))
 
         count_result = await db.execute(count_stmt)
-        total = len(count_result.scalars().all())
+        total = count_result.scalar() or 0
 
         # Execute paginated query
         offset = (page - 1) * per_page
@@ -99,6 +137,10 @@ async def list_trades(
 
         result = await db.execute(query_stmt)
         trades = result.scalars().all()
+        strategy_lookup = await _load_strategy_lookup(
+            db,
+            {trade.strategy_id for trade in trades if trade.strategy_id},
+        )
 
         logger.info(
             "trades_listed",
@@ -110,7 +152,7 @@ async def list_trades(
         )
 
         return TradeList(
-            trades=[TradeResponse.model_validate(t) for t in trades],
+            trades=[_attach_strategy_metadata(t, strategy_lookup) for t in trades],
             total=total,
             page=page,
             per_page=per_page,
@@ -129,140 +171,18 @@ async def list_trades(
         )
 
 
-@router.get("/{trade_id}", response_model=TradeResponse)
-async def get_trade(
-    trade_id: str,
-    current_user: str = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> TradeResponse:
-    """
-    PURPOSE: Retrieve a single trade by ID with complete details.
-
-    CALLED BY: Trade detail page, position monitoring
-
-    Args:
-        trade_id: UUID of trade to retrieve
-        current_user: Authenticated username
-        db: Database session
-
-    Returns:
-        TradeResponse: Complete trade details
-
-    Raises:
-        HTTPException: If trade not found or database error occurs
-    """
-    try:
-        stmt = select(Trade).where(Trade.id == trade_id)
-        result = await db.execute(stmt)
-        trade = result.scalar_one_or_none()
-
-        if not trade:
-            logger.warning("trade_not_found", trade_id=trade_id)
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Trade not found"
-            )
-
-        logger.info("trade_retrieved", trade_id=trade_id)
-        return TradeResponse.model_validate(trade)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(
-            "get_trade_failed",
-            trade_id=trade_id,
-            error=str(e)
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve trade"
-        )
-
-
-# ════════════════════════════════════════════════════════════════
-# Trade Creation
-# ════════════════════════════════════════════════════════════════
-
-
-@router.post("", response_model=TradeResponse)
-async def create_trade(
-    trade_data: TradeCreate,
-    current_user: str = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> TradeResponse:
-    """
-    PURPOSE: Create a new trade record in the system.
-
-    CALLED BY: Manual trade entry, external trading systems
-
-    Args:
-        trade_data: TradeCreate schema with required trade details
-        current_user: Authenticated username
-        db: Database session
-
-    Returns:
-        TradeResponse: Created trade with all details
-
-    Raises:
-        HTTPException: If trade creation fails or validation error
-    """
-    try:
-        # Create trade instance from schema
-        new_trade = Trade(
-            symbol=trade_data.symbol,
-            direction=trade_data.direction,
-            lots=trade_data.lots,
-            entry_price=trade_data.entry_price,
-            stop_loss=trade_data.stop_loss,
-            take_profit=trade_data.take_profit,
-            strategy_code=trade_data.strategy_code,
-            reason=trade_data.reason,
-            status="open",
-            profit=0.0,
-            commission=0.0,
-            swap=0.0,
-            net_profit=0.0,
-            is_simulated=False,
-            opened_at=datetime.utcnow(),
-        )
-
-        db.add(new_trade)
-        await db.commit()
-        await db.refresh(new_trade)
-
-        logger.info(
-            "trade_created",
-            trade_id=str(new_trade.id),
-            symbol=new_trade.symbol,
-            direction=new_trade.direction
-        )
-
-        return TradeResponse.model_validate(new_trade)
-
-    except Exception as e:
-        await db.rollback()
-        logger.error(
-            "trade_creation_failed",
-            error=str(e),
-            symbol=trade_data.symbol
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create trade"
-        )
-
-
 # ════════════════════════════════════════════════════════════════
 # Trade Statistics
 # ════════════════════════════════════════════════════════════════
 
 
 @router.get("/stats/summary", response_model=TradeStats)
+@limiter.limit(READ_LIMIT)
 async def get_trade_stats(
+    request: Request,
     days_ago: Optional[int] = Query(None, ge=0, description="Stats for last N days"),
     strategy_filter: Optional[str] = Query(None, description="Filter by strategy code"),
-    current_user: str = Depends(get_current_user),
+    _current_user: str = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> TradeStats:
     """
@@ -284,7 +204,7 @@ async def get_trade_stats(
     """
     try:
         # Build filters
-        filters = [Trade.status == "closed"]
+        filters = [Trade.status == "CLOSED"]
 
         if days_ago is not None:
             cutoff_date = datetime.utcnow() - timedelta(days=days_ago)
@@ -338,7 +258,7 @@ async def get_trade_stats(
         max_drawdown = 0.0
         running_max = 0.0
         cumulative = 0.0
-        for trade in sorted(trades, key=lambda t: t.closed_at):
+        for trade in sorted(trades, key=lambda t: t.closed_at or datetime.min):
             cumulative += trade.net_profit
             if cumulative > running_max:
                 running_max = cumulative
@@ -382,4 +302,162 @@ async def get_trade_stats(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to calculate trade statistics"
+        )
+
+
+@router.get("/{trade_id}", response_model=TradeResponse)
+@limiter.limit(READ_LIMIT)
+async def get_trade(
+    request: Request,
+    trade_id: str,
+    _current_user: str = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> TradeResponse:
+    """
+    PURPOSE: Retrieve a single trade by ID with complete details.
+
+    CALLED BY: Trade detail page, position monitoring
+
+    Args:
+        trade_id: UUID of trade to retrieve
+        current_user: Authenticated username
+        db: Database session
+
+    Returns:
+        TradeResponse: Complete trade details
+
+    Raises:
+        HTTPException: If trade not found or database error occurs
+    """
+    try:
+        stmt = select(Trade).where(Trade.id == trade_id)
+        result = await db.execute(stmt)
+        trade = result.scalar_one_or_none()
+
+        if not trade:
+            logger.warning("trade_not_found", trade_id=trade_id)
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Trade not found"
+            )
+
+        strategy_lookup = await _load_strategy_lookup(
+            db,
+            {trade.strategy_id} if trade.strategy_id else set(),
+        )
+
+        logger.info("trade_retrieved", trade_id=trade_id)
+        return _attach_strategy_metadata(trade, strategy_lookup)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "get_trade_failed",
+            trade_id=trade_id,
+            error=str(e)
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve trade"
+        )
+
+
+# ════════════════════════════════════════════════════════════════
+# Trade Creation
+# ════════════════════════════════════════════════════════════════
+
+
+@router.post("", response_model=TradeResponse)
+@limiter.limit(WRITE_LIMIT)
+async def create_trade(
+    request: Request,
+    trade_data: TradeCreate,
+    current_user: str = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> TradeResponse:
+    """
+    PURPOSE: Create a new trade record in the system.
+
+    CALLED BY: Manual trade entry, external trading systems
+
+    Args:
+        trade_data: TradeCreate schema with required trade details
+        current_user: Authenticated username
+        db: Database session
+
+    Returns:
+        TradeResponse: Created trade with all details
+
+    Raises:
+        HTTPException: If trade creation fails or validation error
+    """
+    try:
+        from app.models.account import MasterAccount
+        from app.config.settings import settings
+
+        # Get or create master account for API trades
+        stmt = select(MasterAccount).limit(1)
+        result = await db.execute(stmt)
+        master = result.scalar_one_or_none()
+        if not master:
+            master = MasterAccount(mt5_login=settings.MT5_LOGIN or 99999, broker="API", status="RUNNING")
+            db.add(master)
+            await db.flush()
+
+        # Resolve strategy_code to strategy_id
+        strategy_id = None
+        if trade_data.strategy_code:
+            stmt = select(Strategy).where(Strategy.code == trade_data.strategy_code.upper())
+            result = await db.execute(stmt)
+            strategy = result.scalar_one_or_none()
+            if strategy:
+                strategy_id = strategy.id
+
+        new_trade = Trade(
+            master_id=master.id,
+            strategy_id=strategy_id,
+            symbol=trade_data.symbol,
+            direction=trade_data.direction.upper(),
+            lots=trade_data.lots,
+            entry_price=trade_data.entry_price,
+            stop_loss=trade_data.stop_loss,
+            take_profit=trade_data.take_profit,
+            reason=trade_data.reason,
+            status="OPEN",
+            profit=0.0,
+            commission=0.0,
+            swap=0.0,
+            net_profit=0.0,
+            is_simulated=False,
+            opened_at=datetime.utcnow(),
+        )
+
+        db.add(new_trade)
+        await db.commit()
+        await db.refresh(new_trade)
+
+        logger.info(
+            "trade_created",
+            trade_id=str(new_trade.id),
+            symbol=new_trade.symbol,
+            direction=new_trade.direction
+        )
+
+        strategy_lookup = await _load_strategy_lookup(
+            db,
+            {new_trade.strategy_id} if new_trade.strategy_id else set(),
+        )
+        return _attach_strategy_metadata(new_trade, strategy_lookup)
+
+    except Exception as e:
+        await db.rollback()
+        logger.error(
+            "trade_creation_failed",
+            error=str(e),
+            symbol=trade_data.symbol
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create trade"
         )

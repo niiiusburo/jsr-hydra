@@ -34,14 +34,17 @@ class DashboardSummary(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
-    account: AccountResponse
+    account: Optional[AccountResponse] = None
     regime: Optional[RegimeResponse] = None
-    allocations: list[AllocationResponse]
-    strategies: list[StrategyMetrics]
-    recent_trades: list[TradeResponse]
-    equity_curve: list[dict]
-    system_status: str
-    version: str
+    allocations: list[AllocationResponse] = []
+    strategies: list[StrategyMetrics] = []
+    recent_trades: list[TradeResponse] = []
+    equity_curve: list[dict] = []
+    system_status: str = "unknown"
+    version: str = "1.0.0"
+    mt5: Optional[dict] = None
+    positions: list[dict] = []
+    trading: Optional[dict] = None
 
 
 class LiveUpdate(BaseModel):

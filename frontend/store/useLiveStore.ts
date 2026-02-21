@@ -4,7 +4,8 @@
  */
 
 import { create } from "zustand";
-import { LiveUpdate, WsStatus } from "../lib/types";
+import { LiveUpdate } from "../lib/types";
+import { WsStatus } from "../lib/ws";
 
 interface LiveState {
   // Connection status
