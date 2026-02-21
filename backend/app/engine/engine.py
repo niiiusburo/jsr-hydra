@@ -1900,21 +1900,22 @@ class TradingEngine:
                         symbol = trade_info.get('symbol', '')
                         direction = trade_info.get('direction', 'BUY')
 
-                        # Point value depends on the symbol
-                        if 'JPY' in symbol:
-                            pip_value = 100.0  # per lot per pip for JPY pairs
-                            point_diff = exit_price - entry_p
+                        # Contract size depends on the symbol
+                        # 1 lot = contract_size units; profit = point_diff * lots * contract_size
+                        point_diff = exit_price - entry_p
+                        if 'BTC' in symbol or 'ETH' in symbol or 'LTC' in symbol or 'XRP' in symbol:
+                            contract_size = 1.0       # 1 lot = 1 coin
                         elif 'XAU' in symbol:
-                            pip_value = 100.0  # per lot per pip for gold
-                            point_diff = exit_price - entry_p
+                            contract_size = 100.0     # 1 lot = 100 oz
+                        elif 'JPY' in symbol:
+                            contract_size = 100000.0  # 1 lot = 100k units (JPY)
                         else:
-                            pip_value = 100000.0  # per lot for standard pairs
-                            point_diff = exit_price - entry_p
+                            contract_size = 100000.0  # 1 lot = 100k units (standard forex)
 
                         if direction == 'SELL':
                             point_diff = -point_diff
 
-                        profit = round(point_diff * lots * pip_value, 2)
+                        profit = round(point_diff * lots * contract_size, 2)
                         logger.info(
                             "profit_calculated_from_prices",
                             entry=entry_p, exit=exit_price,

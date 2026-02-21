@@ -71,7 +71,7 @@ export function EquityChart({ data, loading = false }: EquityChartProps) {
             tick={{ fill: '#9CA3AF', fontSize: 12 }}
             stroke="#4B5563"
             domain={['dataMin', 'dataMax']}
-            tickFormatter={(value) => `$${(value / 1000).toFixed(0)}k`}
+            tickFormatter={(value) => value >= 1000 ? `$${(value / 1000).toFixed(0)}k` : `$${value.toFixed(0)}`}
           />
           <Tooltip content={<CustomTooltip />} />
           <Area

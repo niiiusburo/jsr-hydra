@@ -165,7 +165,7 @@ export default function Header() {
 
         {/* Center Section - Equity Display */}
         <div className="flex flex-col items-center">
-          <span className="text-xs text-gray-400">Account Equity</span>
+          <span className="text-xs text-gray-400">Account Balance</span>
           <span className="text-lg font-bold text-brand-accent-green">
             {isLoading || accountEquity === null
               ? '—'

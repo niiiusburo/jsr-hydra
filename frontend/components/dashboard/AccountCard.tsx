@@ -97,7 +97,7 @@ export function AccountCard({ data, loading = false }: AccountCardProps) {
           <p className="text-xs text-gray-400 uppercase tracking-wide mb-2">Floating P&L</p>
           <div className="flex items-baseline gap-2">
             <p className={`text-3xl font-bold ${isProfitPositive ? 'text-brand-accent-green' : 'text-brand-accent-red'}`}>
-              {isProfitPositive ? '+' : ''}{data.profit.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {isProfitPositive ? '+$' : '-$'}{Math.abs(data.profit || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
             </p>
             <p className="text-sm text-gray-400">{data.currency}</p>
           </div>

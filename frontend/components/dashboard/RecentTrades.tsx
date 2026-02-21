@@ -62,9 +62,11 @@ export function RecentTrades({ trades, loading = false }: RecentTradesProps) {
   }
 
   const formatPrice = (price: number, symbol: string) => {
-    if (!price) return '-'
-    // JPY pairs use 3 digits, gold uses 2, forex uses 5
-    const digits = symbol?.includes('JPY') ? 3 : symbol?.includes('XAU') ? 2 : 5
+    if (price === null || price === undefined) return '-'
+    // JPY pairs use 3 digits, gold/crypto uses 2, forex uses 5
+    const digits = symbol?.includes('JPY') ? 3
+      : (symbol?.includes('XAU') || symbol?.includes('BTC') || symbol?.includes('ETH')) ? 2
+      : 5
     return price.toFixed(digits)
   }
 

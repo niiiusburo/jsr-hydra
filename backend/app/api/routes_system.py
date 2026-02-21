@@ -175,15 +175,16 @@ def _estimate_open_profit(
     if (direction or "").upper() == "SELL":
         point_diff = -point_diff
 
-    # Mirror close-profit conventions in engine.py for consistency.
-    if "JPY" in symbol:
-        pip_value = 100.0
+    # Contract size depends on symbol — must match engine.py conventions.
+    # 1 lot = contract_size units; profit = point_diff * lots * contract_size
+    if any(c in symbol for c in ("BTC", "ETH", "LTC", "XRP")):
+        contract_size = 1.0       # 1 lot = 1 coin
     elif "XAU" in symbol:
-        pip_value = 100.0
+        contract_size = 100.0     # 1 lot = 100 oz
     else:
-        pip_value = 100000.0
+        contract_size = 100000.0  # 1 lot = 100k units (standard forex incl. JPY)
 
-    return round(point_diff * lots * pip_value, 2)
+    return round(point_diff * lots * contract_size, 2)
 
 
 def _map_open_trades_to_positions(
