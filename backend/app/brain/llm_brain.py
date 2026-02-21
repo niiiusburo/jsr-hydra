@@ -163,6 +163,10 @@ class LLMBrain:
                 content = message_obj.get("content") if isinstance(message_obj, dict) else None
                 content_str = str(content or "").strip()
                 if not content_str:
+                    # Z.AI "thinking" models (e.g. glm-5) put content in reasoning_content
+                    reasoning = message_obj.get("reasoning_content") if isinstance(message_obj, dict) else None
+                    content_str = str(reasoning or "").strip()
+                if not content_str:
                     return "[LLM Error][EmptyContent] Provider returned an empty completion."
                 return content_str
         except httpx.HTTPStatusError as e:
