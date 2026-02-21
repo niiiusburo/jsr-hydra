@@ -1543,16 +1543,22 @@ class Brain:
     async def _llm_hourly_strategy_review(self) -> None:
         """Fire LLM hourly strategy review (rate-limited internally to 1h)."""
         try:
-            strategy_stats = {
-                code: {
-                    "win_rate": perf.get("win_rate", 0),
-                    "total_trades": perf.get("total_trades", 0),
-                    "total_profit": perf.get("total_profit", 0),
-                    "avg_profit": perf.get("avg_profit", 0),
-                    "allocation_pct": self._allocations.get(code, 0),
+            # Build strategy stats from available brain state
+            strategy_stats = {}
+            for code, score in self._strategy_scores.items():
+                strategy_stats[code] = {
+                    "confidence": score.get("confidence", 0),
+                    "reason": score.get("reason", ""),
+                    "signal": score.get("signal", "none"),
                 }
-                for code, perf in self._strategy_performance.items()
-            }
+            # Add XP data if available
+            xp_all = self._strategy_xp.get_all_xp()
+            for code, xp in xp_all.items():
+                if code not in strategy_stats:
+                    strategy_stats[code] = {}
+                strategy_stats[code]["xp"] = xp.get("xp", 0)
+                strategy_stats[code]["level"] = xp.get("level", 1)
+                strategy_stats[code]["win_streak"] = xp.get("win_streak", 0)
             if not strategy_stats:
                 return
             insight = await self._llm.hourly_strategy_review(strategy_stats)
