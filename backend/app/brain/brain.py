@@ -661,26 +661,37 @@ class Brain:
         market_data: Dict[str, Any],
         llm_regime_change: Optional[Dict[str, Any]],
     ) -> None:
-        """Run LLM jobs in non-blocking mode, capturing runtime errors for dashboard visibility."""
+        """Run LLM jobs sequentially to avoid rate limiting on providers with tight quotas."""
         if not self._llm:
             return
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                if llm_regime_change:
-                    asyncio.ensure_future(
-                        self._llm_analyze_regime_change(
-                            llm_regime_change["old"],
-                            llm_regime_change["new"],
-                            llm_regime_change.get("indicators", {}),
-                        )
-                    )
-                asyncio.ensure_future(self._llm_analyze_market(market_data))
-                asyncio.ensure_future(self._llm_hourly_strategy_review())
+                asyncio.ensure_future(
+                    self._run_llm_pipeline(market_data, llm_regime_change)
+                )
             else:
                 loop.run_until_complete(self._llm_analyze_market(market_data))
         except Exception as e:
             self._set_llm_runtime_error(str(e), context="cycle_schedule")
+
+    async def _run_llm_pipeline(
+        self,
+        market_data: Dict[str, Any],
+        llm_regime_change: Optional[Dict[str, Any]],
+    ) -> None:
+        """Run all LLM jobs sequentially so they don't compete for rate limits."""
+        if llm_regime_change:
+            await self._llm_analyze_regime_change(
+                llm_regime_change["old"],
+                llm_regime_change["new"],
+                llm_regime_change.get("indicators", {}),
+            )
+            await asyncio.sleep(3)
+
+        await self._llm_analyze_market(market_data)
+        await asyncio.sleep(3)
+        await self._llm_hourly_strategy_review()
 
     def process_cycle(self, cycle_data: dict) -> None:
         """
