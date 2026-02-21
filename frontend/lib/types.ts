@@ -191,6 +191,12 @@ export interface AllocationUpdate {
 export interface DashboardSummary {
   account: AccountData | null;
   positions: any[];
+  floating_profit?: number;
+  open_positions?: number;
+  open_positions_mt5?: number;
+  open_trades_db?: number;
+  open_positions_source?: "mt5" | "db" | "none" | "hybrid" | "mt5+db";
+  open_count_source?: "mt5" | "db" | "mt5+db";
   strategies: StrategyData[];
   recent_trades: TradeData[];
   regime: RegimeData | null;
@@ -214,6 +220,9 @@ export interface HealthCheck {
     dry_run: boolean;
     system_status: string;
     open_positions: number;
+    open_positions_mt5?: number;
+    open_trades_db?: number;
+    open_positions_source?: "mt5" | "db" | "mt5+db";
   };
 }
 
