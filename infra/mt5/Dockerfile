@@ -30,3 +30,14 @@ RUN sed -i 's|python3 -m mt5linux.*python.exe.*|echo "[JSR] rpyc server disabled
     echo 'echo "[JSR] Launching AutoTrading enabler in background..."' >> /Metatrader/start.sh && \
     echo '/app/enable_autotrading.sh &' >> /Metatrader/start.sh && \
     echo "[JSR] Patched start.sh: disabled rpyc, added Flask bridge + AutoTrading enabler"
+
+# Create an s6 service to run MT5 start.sh reliably on boot
+# (openbox autostart is unreliable — this ensures MT5 always starts)
+RUN mkdir -p /etc/s6-overlay/s6-rc.d/svc-mt5 && \
+    echo "longrun" > /etc/s6-overlay/s6-rc.d/svc-mt5/type && \
+    printf '#!/usr/bin/with-contenv bash\n\n# Wait for desktop (Xvnc + openbox) to be ready\nuntil xdpyinfo -display :1 >/dev/null 2>&1; do sleep 2; done\nsleep 5\n\ncd /Metatrader\nexec s6-setuidgid abc \\\n  env DISPLAY=:1 \\\n  bash /Metatrader/start.sh\n' > /etc/s6-overlay/s6-rc.d/svc-mt5/run && \
+    chmod +x /etc/s6-overlay/s6-rc.d/svc-mt5/run && \
+    mkdir -p /etc/s6-overlay/s6-rc.d/svc-mt5/dependencies.d && \
+    touch /etc/s6-overlay/s6-rc.d/svc-mt5/dependencies.d/svc-de && \
+    touch /etc/s6-overlay/s6-rc.d/user2/contents.d/svc-mt5 && \
+    echo "[JSR] Created svc-mt5 s6 service (depends on svc-de)"
