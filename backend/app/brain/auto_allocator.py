@@ -46,7 +46,7 @@ WEIGHT_RL_EXPECTED = 0.20
 WEIGHT_STREAK = 0.10
 
 # Strategy codes
-STRATEGY_CODES = ("A", "B", "C", "D")
+STRATEGY_CODES = ("A", "B", "C", "D", "E")
 
 
 class AutoAllocator:

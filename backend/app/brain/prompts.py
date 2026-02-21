@@ -311,6 +311,7 @@ def trade_closed_thought(strategy: str, trade_result: dict, learnings: str) -> s
     ticket = trade_result.get("ticket", "N/A")
     profit = trade_result.get("profit", 0.0)
     won = trade_result.get("won", profit > 0)
+    symbol = trade_result.get("symbol", "")
     entry = trade_result.get("entry_price", 0)
     exit_price = trade_result.get("exit_price", 0)
 
@@ -326,8 +327,22 @@ def trade_closed_thought(strategy: str, trade_result: dict, learnings: str) -> s
     ]
 
     if entry and exit_price:
-        pips = abs(exit_price - entry) * 10000  # Approximate pip calculation
-        parts.append(f"Moved {pips:.1f} pips from entry ({entry:.5f} -> {exit_price:.5f}).")
+        # Pip multiplier depends on instrument type
+        sym = symbol.upper() if symbol else ""
+        if any(c in sym for c in ("BTC", "ETH", "LTC", "XRP")):
+            pip_mult = 1.0       # Crypto: 1 pip = $1
+            fmt = f"({entry:.2f} -> {exit_price:.2f})"
+        elif "XAU" in sym or "GOLD" in sym:
+            pip_mult = 100.0     # Gold: 1 pip = 0.01
+            fmt = f"({entry:.2f} -> {exit_price:.2f})"
+        elif "JPY" in sym:
+            pip_mult = 100.0     # JPY: 1 pip = 0.01
+            fmt = f"({entry:.3f} -> {exit_price:.3f})"
+        else:
+            pip_mult = 10000.0   # Standard forex: 1 pip = 0.0001
+            fmt = f"({entry:.5f} -> {exit_price:.5f})"
+        pips = abs(exit_price - entry) * pip_mult
+        parts.append(f"Moved {pips:.1f} pips from entry {fmt}.")
 
     if learnings:
         parts.append(f"Lesson: {learnings}")

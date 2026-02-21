@@ -20,7 +20,8 @@ STRATEGY_NAMES = {
     "A": "Trend Following (EMA crossover + ADX)",
     "B": "Mean Reversion (Bollinger + Z-score)",
     "C": "Session Breakout",
-    "D": "Volatility Harvester (BB + RSI)",
+    "D": "Momentum Scalper (BB + RSI)",
+    "E": "Range Scalper (Sideways)",
 }
 
 # Minimum trades needed before pattern is considered meaningful

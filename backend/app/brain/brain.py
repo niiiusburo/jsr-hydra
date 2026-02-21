@@ -676,6 +676,7 @@ class Brain:
                         )
                     )
                 asyncio.ensure_future(self._llm_analyze_market(market_data))
+                asyncio.ensure_future(self._llm_hourly_strategy_review())
             else:
                 loop.run_until_complete(self._llm_analyze_market(market_data))
         except Exception as e:
@@ -1538,6 +1539,31 @@ class Brain:
         except Exception as e:
             self._set_llm_runtime_error(str(e), context="trade_review")
             logger.warning("llm_trade_review_failed", error=str(e))
+
+    async def _llm_hourly_strategy_review(self) -> None:
+        """Fire LLM hourly strategy review (rate-limited internally to 1h)."""
+        try:
+            strategy_stats = {
+                code: {
+                    "win_rate": perf.get("win_rate", 0),
+                    "total_trades": perf.get("total_trades", 0),
+                    "total_profit": perf.get("total_profit", 0),
+                    "avg_profit": perf.get("avg_profit", 0),
+                    "allocation_pct": self._allocations.get(code, 0),
+                }
+                for code, perf in self._strategy_performance.items()
+            }
+            if not strategy_stats:
+                return
+            insight = await self._llm.hourly_strategy_review(strategy_stats)
+            self._ingest_llm_insight(
+                insight=insight,
+                insight_type="strategy_review",
+                success_confidence=0.7,
+            )
+        except Exception as e:
+            self._set_llm_runtime_error(str(e), context="strategy_review")
+            logger.warning("llm_strategy_review_failed", error=str(e))
 
     async def _llm_analyze_regime_change(self, old_regime: str, new_regime: str, indicators: Dict) -> None:
         """Fire LLM regime change analysis and add result as a thought."""

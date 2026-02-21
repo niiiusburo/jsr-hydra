@@ -189,6 +189,41 @@ class LLMBrain:
         if len(self._insights_history) > self._max_insights:
             self._insights_history = self._insights_history[-self._max_insights:]
 
+    def _estimate_cost(self) -> float:
+        """Estimate total USD cost based on provider and model."""
+        # Approximate blended rate (input + output averaged)
+        COST_PER_MILLION: Dict[str, float] = {
+            "gpt-4o-mini": 0.375,       # avg of $0.15 input / $0.60 output
+            "gpt-4.1-mini": 0.40,
+            "gpt-4.1-nano": 0.14,
+            "gpt-4o": 7.50,             # avg of $2.50 / $10.00
+            "gpt-4.1": 6.00,
+            "glm-5": 0.10,              # Z.AI approximate
+        }
+        rate = COST_PER_MILLION.get(self._model, 0.40)
+        return round(self._total_tokens_used * rate / 1_000_000, 4)
+
+    async def _call_gpt_with_retry(
+        self, system_prompt: str, user_prompt: str, max_tokens: int = 500, max_retries: int = 2
+    ) -> Optional[str]:
+        """Call LLM with exponential backoff retry on transient errors."""
+        import random
+        result = None
+        for attempt in range(max_retries + 1):
+            result = await self._call_gpt(system_prompt, user_prompt, max_tokens)
+            if result and not self._is_error_content(result):
+                return result
+            # Only retry on transient errors (HTTP 429, 500, 503, timeouts)
+            transient = ["[HTTP 4", "[HTTP 5", "Timeout", "ConnectError"]
+            if result and any(tag in result for tag in transient):
+                if attempt < max_retries:
+                    wait = (2 ** attempt) + random.uniform(0, 1)
+                    logger.info("llm_retry", attempt=attempt + 1, wait=round(wait, 1))
+                    await asyncio.sleep(wait)
+                    continue
+            break  # Non-transient error, don't retry
+        return result
+
     async def analyze_market(self, market_data: Dict) -> Optional[Dict]:
         """
         PURPOSE: Analyze current market conditions. Called every 15 minutes.
@@ -236,7 +271,7 @@ What are the key things to watch? Any dangers? Best opportunities right now?"""
             insight = self._build_insight(
                 "market_analysis",
                 response,
-                tokens_used=self._total_tokens_used,
+                tokens_used=self._total_tokens_used,  # cumulative for stats display
             )
             self._store_insight(insight)
             logger.info("llm_market_analysis_complete", content_length=len(response))
@@ -467,11 +502,7 @@ Focus on:
             "total_calls": self._total_calls,
             "total_tokens_used": self._total_tokens_used,
             # Cost estimate is only available for the current OpenAI default path.
-            "estimated_cost_usd": (
-                round(self._total_tokens_used * 0.00000015, 4)
-                if self._provider == "openai"
-                else 0.0
-            ),
+            "estimated_cost_usd": self._estimate_cost(),
             "model": self._model,
             "insights_count": len(self._insights_history),
             "last_error": last_error,
